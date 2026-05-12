@@ -1,25 +1,35 @@
 import numpy as np
 
-class Generator:
-    def __init__(self, base_xi: np.ndarray, sigma: np.ndarray):
-        self.xi = np.asarray(base_xi, dtype=np.float32)      # (P, F)
-        self.sigma = np.asarray(sigma, dtype=np.float32)     # (P, F)
+
+class RateGenerator:
+
+    def __init__(
+            self,
+            initial_rates: np.ndarray,
+            sigma: np.ndarray,
+            rate_min: float = 0.0,
+            rate_max: float = 1.0,
+    ):
+        self.xi = np.asarray(initial_rates, dtype=np.float32).copy()
+        self.sigma = np.asarray(sigma, dtype=np.float32)
+        self.rate_min = rate_min
+        self.rate_max = rate_max
 
     def sample_population(self, n: int, mirrored: bool = True) -> np.ndarray:
-        shape = self.xi.shape  # (P, F)
+        N = self.xi.shape[0]
 
         if mirrored:
             half = n // 2
-            eps = np.random.normal(size=(half, *shape)).astype(np.float32)
+            eps = np.random.normal(size=(half, N)).astype(np.float32)
             eps = np.vstack([eps, -eps])
             if n % 2 == 1:
-                extra = np.random.normal(size=(1, *shape)).astype(np.float32)
-                eps = np.vstack([eps, extra])
+                eps = np.vstack([eps, np.random.normal(size=(1, N)).astype(np.float32)])
         else:
-            eps = np.random.normal(size=(n, *shape)).astype(np.float32)
+            eps = np.random.normal(size=(n, N)).astype(np.float32)
 
-        return self.xi[None, :, :] + self.sigma[None, :, :] * eps
+        population = self.xi[None, :] + self.sigma[None, :] * eps
+        return np.clip(population, self.rate_min, self.rate_max)
 
     def update(self, grad: np.ndarray, lr: float):
         self.xi -= lr * grad
-        self.xi = np.clip(self.xi, 0.0, 1.0)
+        self.xi = np.clip(self.xi, self.rate_min, self.rate_max)
