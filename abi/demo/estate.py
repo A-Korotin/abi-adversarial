@@ -37,7 +37,7 @@ competitor_features = build_competitors()
 
 generator = RateGenerator(
     initial_rates=initial_rates,
-    sigma=np.full(N_PROPS, 0.08, dtype=np.float32),
+    sigma=np.full(N_PROPS, 0.05, dtype=np.float32),
     rate_min=0.1,
     rate_max=1.0,
 )
@@ -84,11 +84,11 @@ history = train_adversarial(
     weights=WEIGHTS,
     feature_directions=FEATURE_DIRECTIONS,
     build_agents_fn=lambda phi, w, d: build_agents(phi, w, d, n_props=N_PROPS),
-    outer_steps=100,
+    outer_steps=500,
     pop_size_xi=20,
     pop_size_phi=6,
     lr_g=0.05,
-    lr_d=0.05,
+    lr_d=0.01,
 )
 
 _elapsed = time.perf_counter() - _t0

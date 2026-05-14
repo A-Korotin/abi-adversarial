@@ -44,6 +44,11 @@ def _simulate_core(
     rmw = np.float32(ref_market_weight)
     out_u = np.float32(outside_utility)
 
+    # Precompute total portfolio area (fixed throughout simulation)
+    total_area = np.float32(0.0)
+    for j in range(N_PROPS):
+        total_area += portfolio_options[j, 1]
+
     # Allocate working buffers once
     own_utility = np.empty(M, dtype=np.float32)
     competitor_utils = np.empty((M, N_COMP), dtype=np.float32)
@@ -115,24 +120,23 @@ def _simulate_core(
                 comp_chosen_idx[i] = best - np.int32(1)
                 property_choices[i] = np.int32(-1)
 
-        # --- Per-property occupancy and demand-weighted mean rate ---
+        # --- Per-property occupancy (area-weighted) and mean rate over occupied ---
         for j in range(N_PROPS):
             chose_count[j] = np.int32(0)
-        n_portfolio = 0
         for i in range(M):
             if chose_portfolio[i]:
                 chose_count[property_choices[i]] += np.int32(1)
-                n_portfolio += 1
-        n_distinct = 0
+        occupied_area = np.float32(0.0)
+        rate_sum = np.float32(0.0)
+        n_occupied = np.int32(0)
         for j in range(N_PROPS):
             if chose_count[j] > np.int32(0):
-                n_distinct += 1
-        portfolio_share_history[t] = np.float32(n_distinct) / np.float32(N_PROPS)
-        if n_portfolio > 0:
-            rate_sum = np.float32(0.0)
-            for j in range(N_PROPS):
-                rate_sum += portfolio_options[j, 0] * np.float32(chose_count[j])
-            mean_rate_history[t] = rate_sum / np.float32(n_portfolio)
+                occupied_area += portfolio_options[j, 1]
+                rate_sum += portfolio_options[j, 0]
+                n_occupied += np.int32(1)
+        portfolio_share_history[t] = occupied_area / total_area
+        if n_occupied > np.int32(0):
+            mean_rate_history[t] = rate_sum / np.float32(n_occupied)
 
         # --- Reference update ---
         for i in range(M):

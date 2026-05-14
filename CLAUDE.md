@@ -51,7 +51,7 @@ abi/
 
 1. **ScenarioSampler** (discriminator) samples worst-case φ: tenant `ref_shift`, `ref_std`, `switching_cost_scale`.
 2. **RateGenerator** (generator) samples a population of rate vectors ξ ∈ ℝ^N_PROPS around current rates.
-3. **RealEstateSimulator** runs market dynamics: tenants choose among [N_PROPS portfolio] + [3 competitors] + [outside option] using prospect theory utility + Gumbel noise, returning `occupancy` and `mean_rate` at equilibrium.
+3. **RealEstateSimulator** runs market dynamics: tenants choose among [N_PROPS portfolio] + [3 competitors] + [outside option] using prospect theory utility + Gumbel noise, returning `occupancy` (area-weighted share of occupied properties) and `mean_rate` (simple mean rate over occupied properties) at equilibrium.
 4. **RealEstateLoss** computes `−mean_rate` when occupancy ≥ threshold, else `penalty·(threshold − occupancy)²`.
 5. **evolution_gradient()** estimates NES gradients; discriminator maximizes loss (ascent), generator minimizes (descent).
 6. Repeat for `outer_steps` iterations.
@@ -63,6 +63,7 @@ abi/
 - **Prospect theory utility**: agents compare options to their reference vector — deviations go through an S-shaped, loss-averse function before being weighted.
 - **Reference update mix**: `RealEstateSimulator` blends personal choice history with a market benchmark (`ref_market_weight`). Agents choosing the outside option do not update their reference.
 - **Outside option**: a zero-feature option with fixed utility (`outside_utility=0.0`) lets tenants opt out of renting entirely.
+- **1 tenant per property**: each portfolio property is either occupied (≥1 agent chose it) or vacant. `occupancy` is the area-weighted fraction of occupied properties — a large vacant property hurts more than a small one. `mean_rate` is the simple average rate across occupied properties.
 - **Soft occupancy constraint**: `RealEstateLoss` uses a quadratic penalty on occupancy shortfall rather than a hard constraint, with `penalty` controlling tightness.
 
 ## Feature Space (Real Estate)
