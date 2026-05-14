@@ -2,6 +2,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import time
 import numpy as np
 import json
 
@@ -22,6 +23,7 @@ T          = 104
 N_FEATURES = 3
 
 TARGET_RATE = 0.65
+OCCUPANCY_THRESHOLD = 0.75
 
 FEATURE_DIRECTIONS = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
 
@@ -35,7 +37,7 @@ competitor_features = build_competitors()
 
 generator = RateGenerator(
     initial_rates=initial_rates,
-    sigma=np.full(N_PROPS, 0.05, dtype=np.float32),
+    sigma=np.full(N_PROPS, 0.08, dtype=np.float32),
     rate_min=0.1,
     rate_max=1.0,
 )
@@ -65,12 +67,13 @@ simulator = RealEstateSimulator(
 
 loss_fn = RealEstateLoss(
     target_rate=TARGET_RATE,
-    occupancy_threshold=0.80,
+    occupancy_threshold=OCCUPANCY_THRESHOLD,
     penalty=10.0,
 )
 
-print(f"Портфель: {N_PROPS} объектов, агенты: {N_AGENTS}, целевая ставка: {TARGET_RATE:.2f}, ограничение: заполняемость >= 80%")
+print(f"Портфель: {N_PROPS} объектов, агенты: {N_AGENTS}, целевая ставка: {TARGET_RATE:.2f}, ограничение: заполняемость >= {OCCUPANCY_THRESHOLD:.1%}")
 
+_t0 = time.perf_counter()
 history = train_adversarial(
     simulator=simulator,
     generator=generator,
@@ -80,13 +83,16 @@ history = train_adversarial(
     competitor_features=competitor_features,
     weights=WEIGHTS,
     feature_directions=FEATURE_DIRECTIONS,
-    build_agents_fn=build_agents,
-    outer_steps=30,
-    pop_size_xi=4,
-    pop_size_phi=4,
+    build_agents_fn=lambda phi, w, d: build_agents(phi, w, d, n_props=N_PROPS),
+    outer_steps=100,
+    pop_size_xi=20,
+    pop_size_phi=6,
     lr_g=0.05,
     lr_d=0.05,
 )
+
+_elapsed = time.perf_counter() - _t0
+print(f"Время обучения: {_elapsed:.1f} сек")
 
 final_rates = history["rates"][-1]
 final_occ   = history["occupancy"][-1]
@@ -95,7 +101,7 @@ feasible    = history["feasible"][-1]
 
 delta = final_rate - TARGET_RATE
 print(f"\nРезультаты оптимизации:")
-print(f"  Заполняемость:        {final_occ:.1%}  ({'OK' if feasible else 'FAIL'} ограничение 80%)")
+print(f"  Заполняемость:        {final_occ:.1%}  ({'OK' if feasible else 'FAIL'} ограничение {OCCUPANCY_THRESHOLD:.0%})")
 print(f"  Целевая ставка:       {TARGET_RATE:.4f}")
 print(f"  Средняя ставка:       {final_rate:.4f}  (отклонение {delta:+.4f})")
 print(f"  Финальный loss:       {history['gen_loss'][-1]:.6f}")

@@ -29,7 +29,7 @@ from abi.inverse.builders import build_competitors, build_agents
 from abi.inverse.sampler import MarketScenario
 
 N_PROPS    = 150
-N_AGENTS   = 5_000
+N_AGENTS   = 1_000
 N_FEATURES = 3
 T          = 104
 
@@ -73,7 +73,7 @@ phi = MarketScenario(
     switching_cost_scale=0.3,
 )
 np.random.seed(args.seed)
-agents = build_agents(phi, WEIGHTS, FEATURE_DIRECTIONS)
+agents = build_agents(phi, WEIGHTS, FEATURE_DIRECTIONS, n_props=N_PROPS)
 
 competitor_features = build_competitors()
 
@@ -94,6 +94,7 @@ result = simulator.run(
     agents_directions=agents["directions"],
     agents_switching_cost=agents["switching_costs"],
     agents_current=agents["current"],
+    agents_to_property=agents["agent_to_property"],
 )
 
 occ_hist  = result["portfolio_share_history"]
@@ -107,39 +108,6 @@ print("=" * 60)
 print(f"  Шаг равновесия : {eq_step if eq_step else 'не обнаружено (T=' + str(T) + ')'}")
 print(f"  Заполняемость  : {result['occupancy']:.1%}")
 print(f"  Средняя ставка : {result['mean_rate']:.4f}")
-print()
-
-# Фазы становления равновесия
-WINDOW = 10
-print("Динамика по фазам (среднее за каждые 10 шагов):")
-print(f"  {'Фаза':>6}  {'Шаги':>10}  {'Заполн.':>10}  {'Ср.ставка':>10}")
-for i in range(0, T, WINDOW):
-    end = min(i + WINDOW, T)
-    phase_occ  = occ_hist[i:end].mean()
-    phase_rate = rate_hist[i:end].mean()
-    marker = " ← равновесие" if eq_step and i <= eq_step < end else ""
-    print(f"  {i // WINDOW + 1:>6}  {i:>4}–{end - 1:<4}  {phase_occ:>10.1%}  {phase_rate:>10.4f}{marker}")
-
-print()
-
-# Детальная таблица первых 20 шагов
-print("Детальная динамика (первые 20 шагов):")
-print(f"  {'t':>4}  {'Заполн.':>8}  {'Ср.ставка':>10}  {'изм.':>10}")
-prev_occ = occ_hist[0]
-for t in range(min(20, T)):
-    delta = occ_hist[t] - prev_occ if t > 0 else 0.0
-    marker = " ← eq" if t == eq_step else ""
-    print(f"  {t:>4}  {occ_hist[t]:>8.1%}  {rate_hist[t]:>10.4f}  {delta:>+10.4f}{marker}")
-    prev_occ = occ_hist[t]
-
-# Последние 10 шагов
-if T > 20:
-    print("  ...")
-    for t in range(T - 10, T):
-        delta = occ_hist[t] - occ_hist[t - 1] if t > 0 else 0.0
-        marker = " ← eq" if t == eq_step else ""
-        print(f"  {t:>4}  {occ_hist[t]:>8.1%}  {rate_hist[t]:>10.4f}  {delta:>+10.4f}{marker}")
-
 print()
 print(f"Стабильность (std заполн. за последние 20 шагов): {occ_hist[-20:].std():.6f}")
 print(f"Стабильность (std ставки  за последние 20 шагов): {rate_hist[-20:].std():.6f}")

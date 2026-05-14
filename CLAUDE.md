@@ -77,4 +77,6 @@ All features are normalized to [0, 1]:
 
 ## Dependencies
 
-Core: `numpy`, `matplotlib`, `tqdm`. No package manager file — install manually or use the `.venv/` virtual environment already in the repo.
+Core: `numpy`, `matplotlib`, `tqdm`, `numba`. No package manager file — install manually or use the `.venv/` virtual environment already in the repo.
+
+`numba` JIT-compiles the real-estate simulator hot loop (`_simulate_core` in `abi/forward/estate.py`). On first run it compiles and caches to `__pycache__/*.nbi` (~2–5 s one-time overhead); subsequent runs load from cache instantly. Install: `pip install numba`.
