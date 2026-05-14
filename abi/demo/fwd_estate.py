@@ -25,13 +25,18 @@ RESOURCES_DIR = os.path.join(_PROJECT_ROOT, "resources")
 os.makedirs(RESOURCES_DIR, exist_ok=True)
 
 from abi.forward.estate import RealEstateSimulator
-from abi.inverse.builders import build_competitors, build_agents
+from abi.inverse.builders import (
+    build_competitors, build_agents,
+    DEFAULT_COMPETITOR_SIZES, DEFAULT_OUTSIDE_SIZE,
+)
 from abi.inverse.sampler import MarketScenario
 
 N_PROPS    = 150
-N_AGENTS   = 1_000
+N_AGENTS   = 5_000
 N_FEATURES = 3
 T          = 104
+K_VISIBLE  = 8
+OCCUPANCY_THRESHOLD = 0.65
 
 FEATURE_DIRECTIONS = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
 WEIGHTS            = np.array([0.4, 0.3, 0.3], dtype=np.float32)
@@ -73,16 +78,20 @@ phi = MarketScenario(
     switching_cost_scale=0.3,
 )
 np.random.seed(args.seed)
-agents = build_agents(phi, WEIGHTS, FEATURE_DIRECTIONS, n_props=N_PROPS)
+agents = build_agents(phi, WEIGHTS, FEATURE_DIRECTIONS, n_props=N_PROPS, K=K_VISIBLE)
 
 competitor_features = build_competitors()
 
-
 simulator = RealEstateSimulator(
     T=T,
+    K=K_VISIBLE,
     lr_ref=0.05,
     ref_market_weight=0.3,
     outside_utility=0.0,
+    outside_size=DEFAULT_OUTSIDE_SIZE,
+    lambda_portfolio=0.6,
+    lambda_comp=0.6,
+    competitor_sizes=DEFAULT_COMPETITOR_SIZES,
 )
 
 result = simulator.run(
@@ -93,8 +102,9 @@ result = simulator.run(
     agents_w=agents["w"],
     agents_directions=agents["directions"],
     agents_switching_cost=agents["switching_costs"],
-    agents_current=agents["current"],
-    agents_to_property=agents["agent_to_property"],
+    agents_current_nest=agents["current_nest"],
+    agents_current_inner=agents["current_inner"],
+    agents_to_properties=agents["agent_to_properties"],
 )
 
 occ_hist  = result["portfolio_share_history"]
@@ -121,7 +131,7 @@ if eq_step is not None:
     ax1.axvline(eq_step, color="red", linestyle="--", label=f"Равновесие (шаг {eq_step})")
     ax1.axhline(result["occupancy"], color="steelblue", linestyle="dashed",
                 linewidth=1.5, label=f"Равновесная заполняемость {result['occupancy']:.1%}")
-ax1.axhline(0.8, color="gray", linestyle=":", linewidth=1, label="Порог 80%")
+ax1.axhline(OCCUPANCY_THRESHOLD, color="gray", linestyle=":", linewidth=1, label=f"Порог {OCCUPANCY_THRESHOLD:.0%}")
 ax1.set_xlabel("Период")
 ax1.set_ylabel("Доля арендаторов в портфеле")
 ax1.legend()
@@ -155,7 +165,7 @@ if args.rates is None:
     fig2.suptitle("История adversarial-оптимизации", fontsize=14)
 
     ax3.plot(steps, occ_opt, color="steelblue", label="Заполняемость (лучший кандидат)")
-    ax3.axhline(0.8, color="gray", linestyle=":", linewidth=1, label="Порог 80%")
+    ax3.axhline(OCCUPANCY_THRESHOLD, color="gray", linestyle=":", linewidth=1, label=f"Порог {OCCUPANCY_THRESHOLD:.0%}")
     ax3.set_xlabel("Внешний шаг")
     ax3.set_ylabel("Заполняемость")
     ax3.set_xticks(range(0, len(steps), max(1, len(steps) // 10)))

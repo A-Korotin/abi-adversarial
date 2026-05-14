@@ -12,7 +12,10 @@ os.makedirs(RESOURCES_DIR, exist_ok=True)
 
 from abi.forward.estate import RealEstateSimulator
 from abi.inverse.loss import RealEstateLoss
-from abi.inverse.builders import build_competitors, build_agents, DEFAULT_COMPETITORS
+from abi.inverse.builders import (
+    build_competitors, build_agents, build_competitor_log_sizes,
+    DEFAULT_COMPETITOR_SIZES, DEFAULT_OUTSIDE_SIZE,
+)
 from abi.inverse.generator import RateGenerator
 from abi.inverse.sampler import MarketScenario, ScenarioSampler
 from abi.inverse.train import train_adversarial
@@ -21,19 +24,28 @@ N_PROPS    = 150
 N_AGENTS   = 1_000
 T          = 104
 N_FEATURES = 3
+K_VISIBLE  = 8  # portfolio properties visible to each agent
 
-TARGET_RATE = 0.65
-OCCUPANCY_THRESHOLD = 0.75
+TARGET_RATE = 0.55
+OCCUPANCY_THRESHOLD = 0.7
 
 FEATURE_DIRECTIONS = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
-
 WEIGHTS = np.array([0.4, 0.3, 0.3], dtype=np.float32)
+
+# Market structure: small competitor clusters with McFadden size correction on portfolio.
+# Sizes calibrated so that at initial rates (0.5) occupancy ≈ 0.69 (above 0.65 threshold).
+COMPETITOR_SIZES = DEFAULT_COMPETITOR_SIZES   # [3, 5, 2] (budget, mid, premium)
+OUTSIDE_SIZE = DEFAULT_OUTSIDE_SIZE           # 5
+
+LAMBDA_PORTFOLIO = 0.6
+LAMBDA_COMP = 0.6
 
 rng = np.random.default_rng(42)
 
 fixed_features = rng.uniform(0.2, 0.8, size=(N_PROPS, 2)).astype(np.float32)
 initial_rates = np.full(N_PROPS, 0.5, dtype=np.float32)
 competitor_features = build_competitors()
+competitor_log_sizes = build_competitor_log_sizes(COMPETITOR_SIZES)
 
 generator = RateGenerator(
     initial_rates=initial_rates,
@@ -60,9 +72,14 @@ discriminator = ScenarioSampler(
 
 simulator = RealEstateSimulator(
     T=T,
+    K=K_VISIBLE,
     lr_ref=0.05,
     ref_market_weight=0.3,
     outside_utility=0.0,
+    outside_size=OUTSIDE_SIZE,
+    lambda_portfolio=LAMBDA_PORTFOLIO,
+    lambda_comp=LAMBDA_COMP,
+    competitor_sizes=COMPETITOR_SIZES,
 )
 
 loss_fn = RealEstateLoss(
@@ -71,7 +88,7 @@ loss_fn = RealEstateLoss(
     penalty=10.0,
 )
 
-print(f"Портфель: {N_PROPS} объектов, агенты: {N_AGENTS}, целевая ставка: {TARGET_RATE:.2f}, ограничение: заполняемость >= {OCCUPANCY_THRESHOLD:.1%}")
+print(f"Портфель: {N_PROPS} объектов, агенты: {N_AGENTS}, K={K_VISIBLE}, целевая ставка: {TARGET_RATE:.2f}, ограничение: заполняемость >= {OCCUPANCY_THRESHOLD:.1%}")
 
 _t0 = time.perf_counter()
 history = train_adversarial(
@@ -83,8 +100,8 @@ history = train_adversarial(
     competitor_features=competitor_features,
     weights=WEIGHTS,
     feature_directions=FEATURE_DIRECTIONS,
-    build_agents_fn=lambda phi, w, d: build_agents(phi, w, d, n_props=N_PROPS),
-    outer_steps=500,
+    build_agents_fn=lambda phi, w, d: build_agents(phi, w, d, n_props=N_PROPS, K=K_VISIBLE),
+    outer_steps=100,
     pop_size_xi=20,
     pop_size_phi=6,
     lr_g=0.05,

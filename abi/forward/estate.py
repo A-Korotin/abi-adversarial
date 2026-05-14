@@ -17,146 +17,195 @@ def _prospect_utility(options, opt_idx, refs, ref_idx, directions, w):
 @njit(cache=True, fastmath=True, nogil=True)
 def _simulate_core(
         T,
-        portfolio_options,    # (N_PROPS, N_F) float32
-        competitor_options,   # (N_COMP, N_F) float32
-        directions,           # (N_F,) float32
-        w,                    # (N_F,) float32
-        market_mean,          # (N_F,) float32
-        refs,                 # (M, N_F) float32  — modified in place
-        current,              # (M,) int32 — option idx: 0=own, 1..N_COMP=comp_k, N_COMP+1=outside, -1=init
-        switching_costs,      # (M,) float32
-        agent_to_property,    # (M,) int32 — which portfolio property each agent evaluates
-        lr_ref,               # float64
-        ref_market_weight,    # float64
-        outside_utility,      # float64
-        gumbel,               # (T, M, N_COMP+2) float32
+        portfolio_options,        # (N_PROPS, N_F) float32
+        competitor_options,       # (N_COMP, N_F) float32
+        competitor_log_sizes,     # (N_COMP,) float32 — ln(S_k) per cluster
+        outside_log_size,         # float32
+        lambda_p,                 # float32 — nest dissimilarity for portfolio
+        lambda_c,                 # float32 — nest dissimilarity for competitors
+        demand_per_unit,          # float32 — M / total_supply_units
+        directions,               # (N_F,) float32
+        w,                        # (N_F,) float32
+        market_mean,              # (N_F,) float32
+        refs,                     # (M, N_F) float32, modified in-place
+        current_nest,             # (M,) int32: 0=portfolio 1=comp 2=outside -1=init
+        current_inner,            # (M,) int32: prop_idx or comp_idx, -1 otherwise
+        switching_costs,          # (M,) float32
+        agent_to_properties,      # (M, K) int32
+        lr_ref,
+        ref_market_weight,
+        outside_utility,          # float32 (base utility before log-size)
+        gumbel_top,               # (T, M, 3) float32 — nest-level noise
+        gumbel_inner_p,           # (T, M, K) float32 — within-portfolio noise
+        gumbel_inner_c,           # (T, M, N_COMP) float32 — within-competitor noise
 ):
     M = refs.shape[0]
     N_PROPS = portfolio_options.shape[0]
     N_COMP = competitor_options.shape[0]
     N_F = portfolio_options.shape[1]
-    N_OUT = np.int32(N_COMP + 1)  # outside option index in choice set
+    K = agent_to_properties.shape[1]
 
     portfolio_share_history = np.zeros(T, dtype=np.float32)
     mean_rate_history = np.zeros(T, dtype=np.float32)
 
+    lp = np.float32(lambda_p)
+    lc = np.float32(lambda_c)
     lr = np.float32(lr_ref)
     rmw = np.float32(ref_market_weight)
-    out_u = np.float32(outside_utility)
+    # outside inclusive value = outside_utility + outside_log_size (single element, no inner noise)
+    I_out_base = np.float32(outside_utility) + np.float32(outside_log_size)
+    dpu = np.float32(demand_per_unit)
 
-    # Precompute total portfolio area (fixed throughout simulation)
     total_area = np.float32(0.0)
     for j in range(N_PROPS):
         total_area += portfolio_options[j, 1]
 
-    # Allocate working buffers once
-    own_utility = np.empty(M, dtype=np.float32)
-    competitor_utils = np.empty((M, N_COMP), dtype=np.float32)
-    chose_portfolio = np.empty(M, dtype=np.bool_)
-    chose_outside = np.empty(M, dtype=np.bool_)
-    comp_chosen_idx = np.empty(M, dtype=np.int32)
-    property_choices = np.empty(M, dtype=np.int32)
+    # Reusable buffers (one agent at a time, sequential)
+    v_p_buf = np.empty(K, dtype=np.float32)
+    v_c_buf = np.empty(N_COMP, dtype=np.float32)
     chose_count = np.zeros(N_PROPS, dtype=np.int32)
+    chosen_nest_arr = np.empty(M, dtype=np.int32)
+    chosen_inner_arr = np.empty(M, dtype=np.int32)
 
-    # Early-exit state (window=20, eps=1e-2, patience=4)
+    # Early-exit (window=20, eps=1e-2, patience=4)
     eq_window = 20
     eq_eps = np.float32(1e-2)
     stable_count = 0
     t_used = T
 
     for t in range(T):
-        # --- Own property utility for each agent ---
-        for i in range(M):
-            own_utility[i] = _prospect_utility(
-                portfolio_options, agent_to_property[i], refs, i, directions, w
-            )
+        for j in range(N_PROPS):
+            chose_count[j] = np.int32(0)
 
-        # --- Competitor utilities (M x N_COMP) ---
+        # --- Per-agent nested logit choice ---
         for i in range(M):
+            sc = switching_costs[i]
+            cn = current_nest[i]
+
+            # Utilities for K visible portfolio properties
+            for k in range(K):
+                v_p_buf[k] = _prospect_utility(
+                    portfolio_options, agent_to_properties[i, k],
+                    refs, i, directions, w
+                )
+
+            # Utilities for N_COMP competitor clusters
             for k in range(N_COMP):
-                competitor_utils[i, k] = _prospect_utility(
+                v_c_buf[k] = _prospect_utility(
                     competitor_options, k, refs, i, directions, w
                 )
 
-        # --- Choice: own_property | comp_1..N_COMP | outside ---
-        for i in range(M):
-            sc = switching_costs[i]
-            cur = current[i]
-            have_cur = cur >= np.int32(0)
+            # Inclusive value: portfolio nest
+            # I_p = max_vp + lp * log(Σ exp((v_p - max_vp) / lp))
+            # + lp * log(N_PROPS / K)  ← McFadden size correction for K-out-of-N sampling
+            max_vp = v_p_buf[0]
+            for k in range(1, K):
+                if v_p_buf[k] > max_vp:
+                    max_vp = v_p_buf[k]
+            s_p = np.float32(0.0)
+            for k in range(K):
+                s_p += np.exp((v_p_buf[k] - max_vp) / lp)
+            I_p = max_vp + lp * (np.log(s_p) + np.log(np.float32(N_PROPS) / np.float32(K)))
 
-            # Option 0: own property
-            sc_adj = np.float32(0.0) if (not have_cur or cur == np.int32(0)) else -sc
-            best_val = own_utility[i] + sc_adj + gumbel[t, i, 0]
-            best = np.int32(0)
-
-            # Options 1..N_COMP: competitors
+            # Inclusive value: competitor nest
+            # I_c = max_adj + lc * log(Σ exp((v_c + log_s - max_adj) / lc))
+            max_vc = v_c_buf[0] + competitor_log_sizes[0]
+            for k in range(1, N_COMP):
+                adj = v_c_buf[k] + competitor_log_sizes[k]
+                if adj > max_vc:
+                    max_vc = adj
+            s_c = np.float32(0.0)
             for k in range(N_COMP):
-                opt = np.int32(k + 1)
-                sc_adj = np.float32(0.0) if (not have_cur or cur == opt) else -sc
-                v = competitor_utils[i, k] + sc_adj + gumbel[t, i, opt]
-                if v > best_val:
-                    best_val = v
-                    best = opt
+                s_c += np.exp((v_c_buf[k] + competitor_log_sizes[k] - max_vc) / lc)
+            I_c = max_vc + lc * np.log(s_c)
 
-            # Option N_COMP+1: outside
-            sc_adj = np.float32(0.0) if (not have_cur or cur == N_OUT) else -sc
-            v = out_u + sc_adj + gumbel[t, i, N_OUT]
-            if v > best_val:
-                best = N_OUT
+            # Apply switching cost at the nest level (not within-nest)
+            I_p_adj = I_p
+            I_c_adj = I_c
+            I_out_adj = I_out_base
+            if cn >= np.int32(0):
+                if cn != np.int32(0):
+                    I_p_adj = I_p - sc
+                if cn != np.int32(1):
+                    I_c_adj = I_c - sc
+                if cn != np.int32(2):
+                    I_out_adj = I_out_base - sc
 
-            current[i] = best
+            # Top-level Gumbel-max over the 3 nests
+            g0 = I_p_adj + gumbel_top[t, i, 0]
+            g1 = I_c_adj + gumbel_top[t, i, 1]
+            g2 = I_out_adj + gumbel_top[t, i, 2]
 
-            if best == np.int32(0):
-                chose_portfolio[i] = True
-                chose_outside[i] = False
-                property_choices[i] = agent_to_property[i]
-            elif best == N_OUT:
-                chose_portfolio[i] = False
-                chose_outside[i] = True
-                property_choices[i] = np.int32(-1)
+            if g0 >= g1 and g0 >= g2:
+                nest = np.int32(0)
+            elif g1 >= g2:
+                nest = np.int32(1)
             else:
-                chose_portfolio[i] = False
-                chose_outside[i] = False
-                comp_chosen_idx[i] = best - np.int32(1)
-                property_choices[i] = np.int32(-1)
+                nest = np.int32(2)
 
-        # --- Per-property occupancy (area-weighted) and mean rate over occupied ---
-        for j in range(N_PROPS):
-            chose_count[j] = np.int32(0)
-        for i in range(M):
-            if chose_portfolio[i]:
-                chose_count[property_choices[i]] += np.int32(1)
+            # Within-nest Gumbel-max
+            if nest == np.int32(0):
+                best_k = np.int32(0)
+                best_v = v_p_buf[0] / lp + gumbel_inner_p[t, i, 0]
+                for k in range(1, K):
+                    v = v_p_buf[k] / lp + gumbel_inner_p[t, i, k]
+                    if v > best_v:
+                        best_v = v
+                        best_k = np.int32(k)
+                inner = agent_to_properties[i, best_k]
+                chose_count[inner] += np.int32(1)
+            elif nest == np.int32(1):
+                best_k = np.int32(0)
+                best_v = (v_c_buf[0] + competitor_log_sizes[0]) / lc + gumbel_inner_c[t, i, 0]
+                for k in range(1, N_COMP):
+                    v = (v_c_buf[k] + competitor_log_sizes[k]) / lc + gumbel_inner_c[t, i, k]
+                    if v > best_v:
+                        best_v = v
+                        best_k = np.int32(k)
+                inner = best_k
+            else:
+                inner = np.int32(-1)
+
+            chosen_nest_arr[i] = nest
+            chosen_inner_arr[i] = inner
+
+        # --- Continuous occupancy: occ_j = min(1, chose_count[j] / demand_per_unit) ---
         occupied_area = np.float32(0.0)
-        rate_sum = np.float32(0.0)
-        n_occupied = np.int32(0)
+        rate_weighted = np.float32(0.0)
         for j in range(N_PROPS):
-            if chose_count[j] > np.int32(0):
-                occupied_area += portfolio_options[j, 1]
-                rate_sum += portfolio_options[j, 0]
-                n_occupied += np.int32(1)
-        portfolio_share_history[t] = occupied_area / total_area
-        if n_occupied > np.int32(0):
-            mean_rate_history[t] = rate_sum / np.float32(n_occupied)
+            frac = np.float32(chose_count[j]) / dpu
+            if frac > np.float32(1.0):
+                frac = np.float32(1.0)
+            area_j = portfolio_options[j, 1]
+            occupied_area += area_j * frac
+            rate_weighted += portfolio_options[j, 0] * area_j * frac
+        if total_area > np.float32(0.0):
+            portfolio_share_history[t] = occupied_area / total_area
+        if occupied_area > np.float32(0.0):
+            mean_rate_history[t] = rate_weighted / occupied_area
 
-        # --- Reference update ---
+        # --- Update state and references ---
         for i in range(M):
-            if not chose_outside[i]:
-                if chose_portfolio[i]:
-                    prop = property_choices[i]
-                    for f in range(N_F):
-                        refs[i, f] = (
-                            (np.float32(1.0) - lr) * refs[i, f]
-                            + lr * (rmw * market_mean[f]
-                                    + (np.float32(1.0) - rmw) * portfolio_options[prop, f])
-                        )
-                else:
-                    comp = comp_chosen_idx[i]
-                    for f in range(N_F):
-                        refs[i, f] = (
-                            (np.float32(1.0) - lr) * refs[i, f]
-                            + lr * (rmw * market_mean[f]
-                                    + (np.float32(1.0) - rmw) * competitor_options[comp, f])
-                        )
+            nest = chosen_nest_arr[i]
+            inner = chosen_inner_arr[i]
+            current_nest[i] = nest
+            if nest != np.int32(2):
+                current_inner[i] = inner
+
+            if nest == np.int32(0):
+                for f in range(N_F):
+                    refs[i, f] = (
+                        (np.float32(1.0) - lr) * refs[i, f]
+                        + lr * (rmw * market_mean[f]
+                                + (np.float32(1.0) - rmw) * portfolio_options[inner, f])
+                    )
+            elif nest == np.int32(1):
+                for f in range(N_F):
+                    refs[i, f] = (
+                        (np.float32(1.0) - lr) * refs[i, f]
+                        + lr * (rmw * market_mean[f]
+                                + (np.float32(1.0) - rmw) * competitor_options[inner, f])
+                    )
 
         # --- Early equilibrium exit ---
         if t >= 2 * eq_window - 1:
@@ -176,13 +225,12 @@ def _simulate_core(
     return portfolio_share_history, mean_rate_history, t_used
 
 
-_rng = np.random.default_rng()  # PCG64 — 2-3x faster than legacy MT
+_rng = np.random.default_rng()
 
 
 def _gumbel_noise(shape):
-    # Gumbel(0,1) = -log(Exp(1)); dtype=float32 skips the float64 intermediate
     E = _rng.standard_exponential(size=shape, dtype=np.float32)
-    np.clip(E, 1e-30, None, out=E)  # prevent log(0) for subnormal float32 draws
+    np.clip(E, 1e-30, None, out=E)
     np.log(E, out=E)
     np.negative(E, out=E)
     return E
@@ -193,14 +241,49 @@ class RealEstateSimulator:
     def __init__(
             self,
             T: int,
+            K: int = 8,
             lr_ref: float = 0.05,
             ref_market_weight: float = 0.3,
             outside_utility: float = 0.0,
+            outside_log_size: float = None,  # ln(outside_size); default ln(100)
+            lambda_portfolio: float = 0.6,
+            lambda_comp: float = 0.6,
+            competitor_log_sizes: np.ndarray = None,
+            competitor_sizes: np.ndarray = None,
+            outside_size: float = 100.0,
     ):
         self.T = T
+        self.K = K
         self.lr_ref = lr_ref
         self.ref_market_weight = ref_market_weight
         self.outside_utility = outside_utility
+        self.lambda_portfolio = float(lambda_portfolio)
+        self.lambda_comp = float(lambda_comp)
+
+        if outside_log_size is not None:
+            self.outside_log_size = float(outside_log_size)
+        else:
+            self.outside_log_size = float(np.log(outside_size))
+
+        if competitor_log_sizes is not None:
+            self.competitor_log_sizes = np.asarray(competitor_log_sizes, dtype=np.float32)
+        elif competitor_sizes is not None:
+            self.competitor_log_sizes = np.log(np.asarray(competitor_sizes, dtype=np.float32))
+        else:
+            from abi.inverse.builders import DEFAULT_COMPETITOR_SIZES
+            self.competitor_log_sizes = np.log(DEFAULT_COMPETITOR_SIZES).astype(np.float32)
+
+        self._comp_supply = float(np.sum(np.exp(self.competitor_log_sizes)))
+        self._out_supply = float(np.exp(self.outside_log_size))
+
+    def sample_gumbel(self, M: int):
+        T, K = self.T, self.K
+        N_COMP = len(self.competitor_log_sizes)
+        return (
+            _gumbel_noise((T, M, 3)),
+            _gumbel_noise((T, M, K)),
+            _gumbel_noise((T, M, N_COMP)),
+        )
 
     def run(
             self,
@@ -211,45 +294,58 @@ class RealEstateSimulator:
             agents_w: np.ndarray,
             agents_directions: np.ndarray,
             agents_switching_cost: np.ndarray,
-            agents_current: np.ndarray,
-            agents_to_property: np.ndarray,
-            gumbel: np.ndarray = None,
+            agents_current_nest: np.ndarray,
+            agents_current_inner: np.ndarray,
+            agents_to_properties: np.ndarray,
+            gumbel=None,
     ):
         portfolio_options = np.concatenate(
             [rates[:, None], fixed_features], axis=1
         ).astype(np.float32)
         competitor_options = np.asarray(competitor_features, dtype=np.float32)
-
         market_mean = competitor_options.mean(axis=0).astype(np.float32)
 
+        N_PROPS = portfolio_options.shape[0]
         M = agents_ref.shape[0]
-        N_COMP = competitor_options.shape[0]
+
+        total_supply = N_PROPS + self._comp_supply + self._out_supply
+        demand_per_unit = np.float32(M / total_supply)
 
         if gumbel is None:
-            gumbel = _gumbel_noise((self.T, M, N_COMP + 2))
+            gumbel = self.sample_gumbel(M)
+        gumbel_top, gumbel_inner_p, gumbel_inner_c = gumbel
 
         refs = agents_ref.copy().astype(np.float32)
-        current = agents_current.copy().astype(np.int32)
+        current_nest = agents_current_nest.copy().astype(np.int32)
+        current_inner = agents_current_inner.copy().astype(np.int32)
         w = np.asarray(agents_w, dtype=np.float32)
         directions = np.asarray(agents_directions, dtype=np.float32)
         switching_costs = agents_switching_cost.astype(np.float32)
-        agent_to_property = np.asarray(agents_to_property, dtype=np.int32)
+        agent_to_properties = np.asarray(agents_to_properties, dtype=np.int32)
 
         portfolio_share_history, mean_rate_history, t_used = _simulate_core(
             self.T,
             portfolio_options,
             competitor_options,
+            self.competitor_log_sizes,
+            np.float32(self.outside_log_size),
+            np.float32(self.lambda_portfolio),
+            np.float32(self.lambda_comp),
+            demand_per_unit,
             directions,
             w,
             market_mean,
             refs,
-            current,
+            current_nest,
+            current_inner,
             switching_costs,
-            agent_to_property,
+            agent_to_properties,
             self.lr_ref,
             self.ref_market_weight,
-            self.outside_utility,
-            gumbel,
+            np.float32(self.outside_utility),
+            gumbel_top.astype(np.float32),
+            gumbel_inner_p.astype(np.float32),
+            gumbel_inner_c.astype(np.float32),
         )
 
         window = min(20, t_used)

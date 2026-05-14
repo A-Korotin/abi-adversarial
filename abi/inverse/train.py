@@ -4,7 +4,6 @@ from tqdm import tqdm
 
 from abi.inverse.grad import evolution_gradient
 from abi.inverse.sampler import phi_to_vector
-from abi.forward.estate import _gumbel_noise
 
 
 def evaluate_candidate(
@@ -16,7 +15,7 @@ def evaluate_candidate(
         weights: np.ndarray,
         feature_directions: np.ndarray,
         agents: dict,
-        gumbel: np.ndarray = None,
+        gumbel=None,
 ) -> dict:
     result = simulator.run(
         rates=rates,
@@ -26,8 +25,9 @@ def evaluate_candidate(
         agents_w=agents["w"],
         agents_directions=agents["directions"],
         agents_switching_cost=agents["switching_costs"],
-        agents_current=agents["current"],
-        agents_to_property=agents["agent_to_property"],
+        agents_current_nest=agents["current_nest"],
+        agents_current_inner=agents["current_inner"],
+        agents_to_properties=agents["agent_to_properties"],
         gumbel=gumbel,
     )
 
@@ -67,7 +67,6 @@ def train_adversarial(
         "phi": [],
     }
 
-    N_COMP = competitor_features.shape[0]
     M = discriminator.n_agents
     N_PROPS = generator.xi.shape[0]
 
@@ -78,7 +77,7 @@ def train_adversarial(
             xi_snapshot = generator.xi.copy()
 
             # CRN: same noise for all phi-candidates (they share rates)
-            g_disc = _gumbel_noise((simulator.T, M, N_COMP + 2))
+            g_disc = simulator.sample_gumbel(M)
 
             disc_results = list(pool.map(
                 lambda phi: evaluate_candidate(
@@ -107,7 +106,7 @@ def train_adversarial(
             xi_pop = generator.sample_population(pop_size_xi, mirrored=True)
 
             # CRN: same noise for all xi-candidates (they share agents and phi)
-            g_gen = _gumbel_noise((simulator.T, M, N_COMP + 2))
+            g_gen = simulator.sample_gumbel(M)
 
             gen_results = list(pool.map(
                 lambda xi: evaluate_candidate(

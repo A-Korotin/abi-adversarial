@@ -65,6 +65,7 @@ class Property:
 class Competitor:
     name: str
     features: np.ndarray  # shape (N_FEATURES,)
+    cluster_size: float = 1.0  # number of real units this cluster aggregates
 
     def __post_init__(self):
         self.features = np.asarray(self.features, dtype=np.float32)
