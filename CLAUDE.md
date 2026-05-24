@@ -52,7 +52,7 @@ abi/
 1. **ScenarioSampler** (discriminator) samples worst-case φ: tenant `ref_shift`, `ref_std`, `switching_cost_scale`.
 2. **RateGenerator** (generator) samples a population of rate vectors ξ ∈ ℝ^N_PROPS around current rates.
 3. **RealEstateSimulator** runs market dynamics: tenants choose among [N_PROPS portfolio] + [3 competitors] + [outside option] using prospect theory utility + Gumbel noise, returning `occupancy` (area-weighted share of occupied properties) and `mean_rate` (simple mean rate over occupied properties) at equilibrium.
-4. **RealEstateLoss** computes `−mean_rate` when occupancy ≥ threshold, else `penalty·(threshold − occupancy)²`.
+4. **RealEstateLoss** uses a phased augmented penalty: when `occupancy < threshold` — `penalty_lin·shortage + penalty_quad·shortage²` (no rate term, avoiding gradient conflict); when `occupancy ≥ threshold` — `−mean_rate + buffer_penalty·shortage²` (rate maximisation with a small boundary buffer).
 5. **evolution_gradient()** estimates NES gradients; discriminator maximizes loss (ascent), generator minimizes (descent).
 6. Repeat for `outer_steps` iterations.
 
@@ -64,7 +64,7 @@ abi/
 - **Reference update mix**: `RealEstateSimulator` blends personal choice history with a market benchmark (`ref_market_weight`). Agents choosing the outside option do not update their reference.
 - **Outside option**: a zero-feature option with fixed utility (`outside_utility=0.0`) lets tenants opt out of renting entirely.
 - **1 tenant per property**: each portfolio property is either occupied (≥1 agent chose it) or vacant. `occupancy` is the area-weighted fraction of occupied properties — a large vacant property hurts more than a small one. `mean_rate` is the simple average rate across occupied properties.
-- **Soft occupancy constraint**: `RealEstateLoss` uses a quadratic penalty on occupancy shortfall rather than a hard constraint, with `penalty` controlling tightness.
+- **Phased loss with augmented penalty**: when the model starts infeasible, `RealEstateLoss` uses only `penalty_lin·shortage + penalty_quad·shortage²` — no rate term — so the gradient points unambiguously toward reducing shortage. The linear term keeps the gradient nonzero even at large shortage (unlike a pure quadratic, which becomes nearly flat relative to the mean when all candidates are far from the boundary). Once feasible, the loss switches to `−mean_rate` to maximise rental income.
 
 ## Feature Space (Real Estate)
 

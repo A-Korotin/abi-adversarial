@@ -38,6 +38,8 @@ def _simulate_core(
         gumbel_top,               # (T, M, 3) float32 — nest-level noise
         gumbel_inner_p,           # (T, M, K) float32 — within-portfolio noise
         gumbel_inner_c,           # (T, M, N_COMP) float32 — within-competitor noise
+        disable_early_exit,       # int32: 1 = always run all T steps
+        lease_frac_threshold,     # float32: frac >= this → property counts as leased
 ):
     M = refs.shape[0]
     N_PROPS = portfolio_options.shape[0]
@@ -47,6 +49,7 @@ def _simulate_core(
 
     portfolio_share_history = np.zeros(T, dtype=np.float32)
     mean_rate_history = np.zeros(T, dtype=np.float32)
+    first_leased = np.full(N_PROPS, -1, dtype=np.int32)
 
     lp = np.float32(lambda_p)
     lc = np.float32(lambda_c)
@@ -173,6 +176,9 @@ def _simulate_core(
         occupied_area = np.float32(0.0)
         rate_weighted = np.float32(0.0)
         for j in range(N_PROPS):
+            frac_j = np.float32(chose_count[j]) / dpu
+            if first_leased[j] < 0 and frac_j >= lease_frac_threshold:
+                first_leased[j] = t
             frac = np.float32(chose_count[j]) / dpu
             if frac > np.float32(1.0):
                 frac = np.float32(1.0)
@@ -208,7 +214,7 @@ def _simulate_core(
                     )
 
         # --- Early equilibrium exit ---
-        if t >= 2 * eq_window - 1:
+        if disable_early_exit == 0 and t >= 2 * eq_window - 1:
             curr_s = np.float32(0.0)
             prev_s = np.float32(0.0)
             for k in range(eq_window):
@@ -222,7 +228,7 @@ def _simulate_core(
             else:
                 stable_count = 0
 
-    return portfolio_share_history, mean_rate_history, t_used
+    return portfolio_share_history, mean_rate_history, t_used, first_leased
 
 
 _rng = np.random.default_rng()
@@ -298,6 +304,8 @@ class RealEstateSimulator:
             agents_current_inner: np.ndarray,
             agents_to_properties: np.ndarray,
             gumbel=None,
+            disable_early_exit: bool = False,
+            lease_frac_threshold: float = 0.0,
     ):
         portfolio_options = np.concatenate(
             [rates[:, None], fixed_features], axis=1
@@ -323,7 +331,7 @@ class RealEstateSimulator:
         switching_costs = agents_switching_cost.astype(np.float32)
         agent_to_properties = np.asarray(agents_to_properties, dtype=np.int32)
 
-        portfolio_share_history, mean_rate_history, t_used = _simulate_core(
+        portfolio_share_history, mean_rate_history, t_used, first_leased = _simulate_core(
             self.T,
             portfolio_options,
             competitor_options,
@@ -346,6 +354,8 @@ class RealEstateSimulator:
             gumbel_top.astype(np.float32),
             gumbel_inner_p.astype(np.float32),
             gumbel_inner_c.astype(np.float32),
+            np.int32(1 if disable_early_exit else 0),
+            np.float32(lease_frac_threshold),
         )
 
         window = min(20, t_used)
@@ -358,4 +368,5 @@ class RealEstateSimulator:
             "mean_rate": eq_mean_rate,
             "portfolio_share_history": portfolio_share_history[:t_used],
             "mean_rate_history": mean_rate_history[:t_used],
+            "first_leased_step": first_leased,
         }

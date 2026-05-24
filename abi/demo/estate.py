@@ -1,5 +1,6 @@
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import time
@@ -20,13 +21,12 @@ from abi.inverse.generator import RateGenerator
 from abi.inverse.sampler import MarketScenario, ScenarioSampler
 from abi.inverse.train import train_adversarial
 
-N_PROPS    = 150
-N_AGENTS   = 1_000
-T          = 104
+N_PROPS = 150
+N_AGENTS = 1_000
+T = 104
 N_FEATURES = 3
-K_VISIBLE  = 8  # portfolio properties visible to each agent
+K_VISIBLE = 12  # portfolio properties visible to each agent
 
-TARGET_RATE = 0.55
 OCCUPANCY_THRESHOLD = 0.7
 
 FEATURE_DIRECTIONS = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
@@ -34,8 +34,8 @@ WEIGHTS = np.array([0.4, 0.3, 0.3], dtype=np.float32)
 
 # Market structure: small competitor clusters with McFadden size correction on portfolio.
 # Sizes calibrated so that at initial rates (0.5) occupancy ≈ 0.69 (above 0.65 threshold).
-COMPETITOR_SIZES = DEFAULT_COMPETITOR_SIZES   # [3, 5, 2] (budget, mid, premium)
-OUTSIDE_SIZE = DEFAULT_OUTSIDE_SIZE           # 5
+COMPETITOR_SIZES = DEFAULT_COMPETITOR_SIZES  # [3, 5, 2] (budget, mid, premium)
+OUTSIDE_SIZE = DEFAULT_OUTSIDE_SIZE  # 5
 
 LAMBDA_PORTFOLIO = 0.6
 LAMBDA_COMP = 0.6
@@ -83,12 +83,14 @@ simulator = RealEstateSimulator(
 )
 
 loss_fn = RealEstateLoss(
-    target_rate=TARGET_RATE,
     occupancy_threshold=OCCUPANCY_THRESHOLD,
-    penalty=10.0,
+    penalty_lin=2.0,
+    penalty_quad=10.0,
+    buffer_penalty=1.0,
 )
 
-print(f"Портфель: {N_PROPS} объектов, агенты: {N_AGENTS}, K={K_VISIBLE}, целевая ставка: {TARGET_RATE:.2f}, ограничение: заполняемость >= {OCCUPANCY_THRESHOLD:.1%}")
+print(
+    f"Портфель: {N_PROPS} объектов, агенты: {N_AGENTS}, K={K_VISIBLE}, ограничение: заполняемость >= {OCCUPANCY_THRESHOLD:.1%}")
 
 _t0 = time.perf_counter()
 history = train_adversarial(
@@ -112,22 +114,20 @@ _elapsed = time.perf_counter() - _t0
 print(f"Время обучения: {_elapsed:.1f} сек")
 
 final_rates = history["rates"][-1]
-final_occ   = history["occupancy"][-1]
-final_rate  = history["mean_rate"][-1]
-feasible    = history["feasible"][-1]
+final_occ = history["occupancy"][-1]
+final_rate = history["mean_rate"][-1]
+feasible = history["feasible"][-1]
 
-delta = final_rate - TARGET_RATE
 print(f"\nРезультаты оптимизации:")
-print(f"  Заполняемость:        {final_occ:.1%}  ({'OK' if feasible else 'FAIL'} ограничение {OCCUPANCY_THRESHOLD:.0%})")
-print(f"  Целевая ставка:       {TARGET_RATE:.4f}")
-print(f"  Средняя ставка:       {final_rate:.4f}  (отклонение {delta:+.4f})")
+print(
+    f"  Заполняемость:        {final_occ:.1%}  ({'OK' if feasible else 'FAIL'} ограничение {OCCUPANCY_THRESHOLD:.0%})")
+print(f"  Средняя ставка:       {final_rate:.4f}")
 print(f"  Финальный loss:       {history['gen_loss'][-1]:.6f}")
 print(f"  Мин. ставка портфеля: {final_rates.min():.4f}")
 print(f"  Макс. ставка:         {final_rates.max():.4f}")
 print(f"  Медиана ставок:       {np.median(final_rates):.4f}")
 
 output = {
-    "target_rate": TARGET_RATE,
     "final_rates": final_rates.tolist(),
     "final_occupancy": float(final_occ),
     "final_mean_rate": float(final_rate),

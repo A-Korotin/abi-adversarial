@@ -20,7 +20,7 @@ DEFAULT_COMPETITORS = np.array([
 
 COMPETITOR_NAMES = ["budget", "mid", "premium"]
 
-DEFAULT_COMPETITOR_SIZES = np.array([3.0, 5.0, 2.0], dtype=np.float32)
+DEFAULT_COMPETITOR_SIZES = np.array([3.0, 4.0, 2.0], dtype=np.float32)
 DEFAULT_OUTSIDE_SIZE = 5.0
 
 
