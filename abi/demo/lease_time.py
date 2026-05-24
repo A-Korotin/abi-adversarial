@@ -33,8 +33,8 @@ from abi.inverse.sampler import MarketScenario
 
 # ── Constants (mirror abi/demo/estate.py) ────────────────────────────────────
 N_PROPS = 150
-N_AGENTS = 1_000
-T = 104
+N_AGENTS = 300
+T = 52
 N_FEATURES = 3
 K_VISIBLE = 12
 
