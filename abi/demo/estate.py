@@ -22,12 +22,12 @@ from abi.inverse.sampler import MarketScenario, ScenarioSampler
 from abi.inverse.train import train_adversarial
 
 N_PROPS = 150
-N_AGENTS = 1_000
+N_AGENTS = 150
 T = 104
 N_FEATURES = 3
-K_VISIBLE = 12  # portfolio properties visible to each agent
+K_VISIBLE = 20  # portfolio properties visible to each agent
 
-OCCUPANCY_THRESHOLD = 0.7
+OCCUPANCY_THRESHOLD = 0.75
 
 FEATURE_DIRECTIONS = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
 WEIGHTS = np.array([0.4, 0.3, 0.3], dtype=np.float32)
@@ -49,7 +49,7 @@ competitor_log_sizes = build_competitor_log_sizes(COMPETITOR_SIZES)
 
 generator = RateGenerator(
     initial_rates=initial_rates,
-    sigma=np.full(N_PROPS, 0.05, dtype=np.float32),
+    sigma=np.full(N_PROPS, 0.1, dtype=np.float32),
     rate_min=0.1,
     rate_max=1.0,
 )
@@ -104,7 +104,7 @@ history = train_adversarial(
     feature_directions=FEATURE_DIRECTIONS,
     build_agents_fn=lambda phi, w, d: build_agents(phi, w, d, n_props=N_PROPS, K=K_VISIBLE),
     outer_steps=100,
-    pop_size_xi=20,
+    pop_size_xi=50,
     pop_size_phi=6,
     lr_g=0.05,
     lr_d=0.01,

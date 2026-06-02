@@ -19,6 +19,52 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
+# ── Presentation style ────────────────────────────────────────────────────────
+COLOR_BEST   = '#2E7D5B'
+COLOR_MEDIAN = '#1E40AF'
+COLOR_WORST  = '#B45309'
+COLOR_GREY   = '#6B7280'
+COLOR_TEXT   = '#1A1A1A'
+COLOR_FAINT  = '#D1D5DB'
+COLOR_BAND   = '#E5E7EB'
+
+plt.rcParams.update({
+    'font.family':       ['DejaVu Sans'],
+    'text.color':        COLOR_TEXT,
+    'axes.labelcolor':   COLOR_TEXT,
+    'axes.edgecolor':    COLOR_FAINT,
+    'xtick.color':       COLOR_GREY,
+    'ytick.color':       COLOR_GREY,
+    'axes.facecolor':    'white',
+    'figure.facecolor':  'white',
+    'axes.grid':         False,
+})
+
+
+def apply_clean_style(ax):
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_color(COLOR_FAINT)
+    ax.spines['bottom'].set_color(COLOR_FAINT)
+    ax.tick_params(length=0)
+
+
+def format_axes_percent_weeks(ax, max_week):
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+    ax.set_ylim(0, 1.05)
+    ax.set_xlim(0, max_week)
+    ax.set_xlabel('Неделя', color=COLOR_GREY, fontsize=10)
+    ax.xaxis.set_major_locator(mticker.MultipleLocator(4))
+
+
+
+
+def business_horizons(ax, weeks=(4, 12, 26)):
+    for w in weeks:
+        ax.axvline(w - 1, color=COLOR_FAINT, lw=1, zorder=0)
+        ax.text(w - 1, 0.01, f'{w} нед',
+                ha='center', fontsize=8, color=COLOR_GREY, va='bottom')
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from abi.forward.estate import RealEstateSimulator
@@ -33,10 +79,10 @@ from abi.inverse.sampler import MarketScenario
 
 # ── Constants (mirror abi/demo/estate.py) ────────────────────────────────────
 N_PROPS = 150
-N_AGENTS = 300
+N_AGENTS = 100
 T = 52
 N_FEATURES = 3
-K_VISIBLE = 12
+K_VISIBLE = 20
 
 FEATURE_DIRECTIONS = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
 WEIGHTS = np.array([0.4, 0.3, 0.3], dtype=np.float32)
@@ -48,7 +94,7 @@ LAMBDA_COMP = 0.6
 
 N_RUNS = 300       # baseline Monte-Carlo runs
 N_SWEEP = 200      # runs per rate level in the sweep
-RATE_GRID = np.array([0.3, 0.4, 0.5, 0.6, 0.7], dtype=np.float32)
+RATE_GRID = np.array([0.2, 0.4, 0.6, 0.8], dtype=np.float32)
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 RESOURCES_DIR = os.path.join(_PROJECT_ROOT, "resources")
@@ -97,7 +143,7 @@ base_phi = MarketScenario(
 agents = build_agents(base_phi, WEIGHTS, FEATURE_DIRECTIONS, n_props=N_PROPS, K=K_VISIBLE)
 
 # ── Helper: run simulator and collect first_leased_step ──────────────────────
-LEASE_FRAC_THRESHOLD = 0.8  # property needs >= 80% of expected demand to count as leased
+LEASE_CAPACITY = 1  # property leased when ≥1 tenant chooses it; M-independent
 
 def _run_once(rates, disable_early_exit=True):
     gumbel = sim.sample_gumbel(N_AGENTS)
@@ -114,7 +160,7 @@ def _run_once(rates, disable_early_exit=True):
         agents_to_properties=agents["agent_to_properties"],
         gumbel=gumbel,
         disable_early_exit=disable_early_exit,
-        lease_frac_threshold=LEASE_FRAC_THRESHOLD,
+        lease_capacity=LEASE_CAPACITY,
     )
     return result["first_leased_step"]
 
@@ -213,32 +259,26 @@ print("\nСводка сохранена: resources/lease_time_summary.json")
 
 # ── 5. Plot: CDF curves for 3 contrasting properties (baseline rates) ────────
 weeks = np.arange(T)
-colors = ["#2196F3", "#FF9800", "#F44336"]
+curve_colors = [COLOR_BEST, COLOR_MEDIAN, COLOR_WORST]
 
 fig, ax = plt.subplots(figsize=(11, 6))
-for j, label, color in zip(contrast_props, contrast_labels, colors):
+for j, label, color in zip(contrast_props, contrast_labels, curve_colors):
     ax.plot(weeks, cdf[j], color=color, lw=2, label=f"{label}  (ставка {rates_opt[j]:.2f})")
 
-# Quantile band across all 150 properties
 p10 = np.percentile(cdf, 10, axis=0)
 p90 = np.percentile(cdf, 90, axis=0)
-ax.fill_between(weeks, p10, p90, alpha=0.12, color="gray", label="10–90% диапазон портфеля")
+ax.fill_between(weeks, p10, p90, alpha=0.18, color=COLOR_GREY, label="10–90% диапазон портфеля")
 
-ax.axvline(3, color="gray", ls="--", lw=1, alpha=0.6)
-ax.axvline(11, color="gray", ls="--", lw=1, alpha=0.6)
-ax.axvline(25, color="gray", ls="--", lw=1, alpha=0.6)
-ax.text(3, 0.02, "4 нед", ha="center", fontsize=8, color="gray")
-ax.text(11, 0.02, "12 нед", ha="center", fontsize=8, color="gray")
-ax.text(25, 0.02, "26 нед", ha="center", fontsize=8, color="gray")
+business_horizons(ax)
 
-ax.set_xlabel("Неделя (шаг симуляции)")
-ax.set_ylabel("P(сдан к неделе t)")
-ax.set_title("Вероятность сдачи объекта во времени (оптимизированные ставки)")
+ax.set_xlabel("Неделя после выставления")
+ax.set_ylabel("Вероятность сдачи")
 ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
 ax.set_xlim(0, T - 1)
 ax.set_ylim(0, 1.05)
 ax.legend(loc="lower right", fontsize=9)
 ax.grid(alpha=0.3)
+apply_clean_style(ax)
 fig.tight_layout()
 _path = os.path.join(RESOURCES_DIR, "lease_time_curves.png")
 fig.savefig(_path, dpi=120, bbox_inches="tight")
@@ -246,8 +286,11 @@ plt.close(fig)
 print(f"График сохранён: {_path}")
 
 # ── 6. Plot: rate sweep trade-off ─────────────────────────────────────────────
-sweep_colors = ["#1565C0", "#1E88E5", "#FB8C00", "#E53935", "#B71C1C"]
 n_contrast = len(contrast_props)
+cmap_sweep = plt.cm.RdYlBu_r
+n_rates = len(RATE_GRID)
+sweep_colors = [cmap_sweep(i / max(1, n_rates - 1)) for i in range(n_rates)]
+
 fig, axes = plt.subplots(1, n_contrast, figsize=(5 * n_contrast, 5), sharey=True)
 if n_contrast == 1:
     axes = [axes]
@@ -263,9 +306,9 @@ for ax, j, label in zip(axes, contrast_props, contrast_labels):
     ax.set_ylim(0, 1.05)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
+    apply_clean_style(ax)
 
-axes[0].set_ylabel("P(сдан к неделе t)")
-fig.suptitle("Trade-off: выше ставка — медленнее сдаём", fontsize=12)
+axes[0].set_ylabel("Вероятность сдачи")
 fig.tight_layout()
 _path = os.path.join(RESOURCES_DIR, "lease_time_rate_sweep.png")
 fig.savefig(_path, dpi=120, bbox_inches="tight")
@@ -273,22 +316,20 @@ plt.close(fig)
 print(f"График сохранён: {_path}")
 
 # ── 7. Plot: portfolio-wide first-lease histogram ────────────────────────────
-# For each property take the median first-leased step across runs
 median_lease_per_prop = np.array([
     _median_lease(first_leased_runs[:, j]) if _median_lease(first_leased_runs[:, j]) is not None else T
     for j in range(N_PROPS)
 ])
 
-# Bin by month (4 weeks)
 bins = list(range(0, T + 4, 4))
 fig, ax = plt.subplots(figsize=(11, 5))
 counts, edges, patches = ax.hist(
-    median_lease_per_prop, bins=bins, color="#2196F3", edgecolor="white", linewidth=0.6
+    median_lease_per_prop, bins=bins, color=COLOR_MEDIAN, edgecolor="white", linewidth=0.6
 )
-# Mark objects that never lease within T
+
 never_leased = int((first_leased_runs < 0).all(axis=0).sum())
 if never_leased > 0:
-    patches[-1].set_facecolor("#F44336")
+    patches[-1].set_facecolor(COLOR_WORST)
     patches[-1].set_label(f"Не сдан в горизонте {T} нед: {never_leased}")
     ax.legend(fontsize=9)
 
@@ -297,6 +338,7 @@ ax.set_ylabel("Количество объектов")
 ax.set_title(f"Распределение времени сдачи по портфелю (N={N_PROPS} объектов, оптимизированные ставки)")
 ax.xaxis.set_major_locator(mticker.MultipleLocator(4))
 ax.grid(axis="y", alpha=0.3)
+apply_clean_style(ax)
 fig.tight_layout()
 _path = os.path.join(RESOURCES_DIR, "lease_time_histogram.png")
 fig.savefig(_path, dpi=120, bbox_inches="tight")

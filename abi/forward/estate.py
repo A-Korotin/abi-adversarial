@@ -39,7 +39,7 @@ def _simulate_core(
         gumbel_inner_p,           # (T, M, K) float32 — within-portfolio noise
         gumbel_inner_c,           # (T, M, N_COMP) float32 — within-competitor noise
         disable_early_exit,       # int32: 1 = always run all T steps
-        lease_frac_threshold,     # float32: frac >= this → property counts as leased
+        lease_capacity,           # float32: chose_count[j] >= this → property leased (M-independent)
 ):
     M = refs.shape[0]
     N_PROPS = portfolio_options.shape[0]
@@ -176,8 +176,7 @@ def _simulate_core(
         occupied_area = np.float32(0.0)
         rate_weighted = np.float32(0.0)
         for j in range(N_PROPS):
-            frac_j = np.float32(chose_count[j]) / dpu
-            if first_leased[j] < 0 and frac_j >= lease_frac_threshold:
+            if first_leased[j] < 0 and np.float32(chose_count[j]) >= lease_capacity:
                 first_leased[j] = t
             frac = np.float32(chose_count[j]) / dpu
             if frac > np.float32(1.0):
@@ -305,7 +304,7 @@ class RealEstateSimulator:
             agents_to_properties: np.ndarray,
             gumbel=None,
             disable_early_exit: bool = False,
-            lease_frac_threshold: float = 0.0,
+            lease_capacity: float = 1.0,
     ):
         portfolio_options = np.concatenate(
             [rates[:, None], fixed_features], axis=1
@@ -355,7 +354,7 @@ class RealEstateSimulator:
             gumbel_inner_p.astype(np.float32),
             gumbel_inner_c.astype(np.float32),
             np.int32(1 if disable_early_exit else 0),
-            np.float32(lease_frac_threshold),
+            np.float32(lease_capacity),
         )
 
         window = min(20, t_used)
