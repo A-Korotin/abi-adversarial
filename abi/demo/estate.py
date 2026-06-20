@@ -22,20 +22,23 @@ from abi.inverse.sampler import MarketScenario, ScenarioSampler
 from abi.inverse.train import train_adversarial
 
 N_PROPS = 150
-N_AGENTS = 150
+N_AGENTS = 300
 T = 104
 N_FEATURES = 3
 K_VISIBLE = 20  # portfolio properties visible to each agent
 
-OCCUPANCY_THRESHOLD = 0.75
+OCCUPANCY_THRESHOLD = 0.60
 
 FEATURE_DIRECTIONS = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
 WEIGHTS = np.array([0.4, 0.3, 0.3], dtype=np.float32)
 
-# Market structure: small competitor clusters with McFadden size correction on portfolio.
-# Sizes calibrated so that at initial rates (0.5) occupancy ≈ 0.69 (above 0.65 threshold).
-COMPETITOR_SIZES = DEFAULT_COMPETITOR_SIZES  # [3, 5, 2] (budget, mid, premium)
-OUTSIDE_SIZE = DEFAULT_OUTSIDE_SIZE  # 5
+# Market structure: competitive market with credible alternatives so that occupancy
+# is elastic to rental rate (threshold ~0.75 crossed around rate ~0.65).
+# DEFAULT_COMPETITOR_SIZES = [3, 2, 1] (budget, mid, premium); DEFAULT_OUTSIDE_SIZE = 1.0
+COMPETITOR_SIZES = DEFAULT_COMPETITOR_SIZES * 5  # [15, 10, 5] — sizeable alternatives
+OUTSIDE_SIZE = DEFAULT_OUTSIDE_SIZE                 # 1.0
+OUTSIDE_UTILITY = 1.0                              # non-trivial outside option utility
+UTILITY_SCALE = 3.0                                # temperature: sharpens price sensitivity
 
 LAMBDA_PORTFOLIO = 0.6
 LAMBDA_COMP = 0.6
@@ -75,11 +78,12 @@ simulator = RealEstateSimulator(
     K=K_VISIBLE,
     lr_ref=0.05,
     ref_market_weight=0.3,
-    outside_utility=0.0,
+    outside_utility=OUTSIDE_UTILITY,
     outside_size=OUTSIDE_SIZE,
     lambda_portfolio=LAMBDA_PORTFOLIO,
     lambda_comp=LAMBDA_COMP,
     competitor_sizes=COMPETITOR_SIZES,
+    utility_scale=UTILITY_SCALE,
 )
 
 loss_fn = RealEstateLoss(

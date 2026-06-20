@@ -23,9 +23,9 @@ def _simulate_core(
         outside_log_size,         # float32
         lambda_p,                 # float32 — nest dissimilarity for portfolio
         lambda_c,                 # float32 — nest dissimilarity for competitors
-        demand_per_unit,          # float32 — M / total_supply_units
         directions,               # (N_F,) float32
         w,                        # (N_F,) float32
+        utility_scale,            # float32 — temperature β: scales prospect utilities
         market_mean,              # (N_F,) float32
         refs,                     # (M, N_F) float32, modified in-place
         current_nest,             # (M,) int32: 0=portfolio 1=comp 2=outside -1=init
@@ -39,7 +39,7 @@ def _simulate_core(
         gumbel_inner_p,           # (T, M, K) float32 — within-portfolio noise
         gumbel_inner_c,           # (T, M, N_COMP) float32 — within-competitor noise
         disable_early_exit,       # int32: 1 = always run all T steps
-        lease_capacity,           # float32: chose_count[j] >= this → property leased (M-independent)
+        lease_capacity,           # float32: chose_count[j] >= this → property leased (binary occupancy)
 ):
     M = refs.shape[0]
     N_PROPS = portfolio_options.shape[0]
@@ -49,15 +49,17 @@ def _simulate_core(
 
     portfolio_share_history = np.zeros(T, dtype=np.float32)
     mean_rate_history = np.zeros(T, dtype=np.float32)
+    # Diagnostic: per-step nest choice counts (portfolio / competitor / outside)
+    nest_count_history = np.zeros((T, 3), dtype=np.float32)
     first_leased = np.full(N_PROPS, -1, dtype=np.int32)
 
     lp = np.float32(lambda_p)
     lc = np.float32(lambda_c)
     lr = np.float32(lr_ref)
     rmw = np.float32(ref_market_weight)
+    beta = np.float32(utility_scale)
     # outside inclusive value = outside_utility + outside_log_size (single element, no inner noise)
     I_out_base = np.float32(outside_utility) + np.float32(outside_log_size)
-    dpu = np.float32(demand_per_unit)
 
     total_area = np.float32(0.0)
     for j in range(N_PROPS):
@@ -85,16 +87,16 @@ def _simulate_core(
             sc = switching_costs[i]
             cn = current_nest[i]
 
-            # Utilities for K visible portfolio properties
+            # Utilities for K visible portfolio properties (scaled by temperature β)
             for k in range(K):
-                v_p_buf[k] = _prospect_utility(
+                v_p_buf[k] = beta * _prospect_utility(
                     portfolio_options, agent_to_properties[i, k],
                     refs, i, directions, w
                 )
 
-            # Utilities for N_COMP competitor clusters
+            # Utilities for N_COMP competitor clusters (scaled by temperature β)
             for k in range(N_COMP):
-                v_c_buf[k] = _prospect_utility(
+                v_c_buf[k] = beta * _prospect_utility(
                     competitor_options, k, refs, i, directions, w
                 )
 
@@ -172,18 +174,21 @@ def _simulate_core(
             chosen_nest_arr[i] = nest
             chosen_inner_arr[i] = inner
 
-        # --- Continuous occupancy: occ_j = min(1, chose_count[j] / demand_per_unit) ---
+        # --- Diagnostic: tally nest choices this step ---
+        for i in range(M):
+            n = chosen_nest_arr[i]
+            nest_count_history[t, n] += np.float32(1.0)
+
+        # --- Binary occupancy: occ_j = 1 if chose_count[j] >= lease_capacity, else 0 ---
         occupied_area = np.float32(0.0)
         rate_weighted = np.float32(0.0)
         for j in range(N_PROPS):
-            if first_leased[j] < 0 and np.float32(chose_count[j]) >= lease_capacity:
-                first_leased[j] = t
-            frac = np.float32(chose_count[j]) / dpu
-            if frac > np.float32(1.0):
-                frac = np.float32(1.0)
-            area_j = portfolio_options[j, 1]
-            occupied_area += area_j * frac
-            rate_weighted += portfolio_options[j, 0] * area_j * frac
+            if np.float32(chose_count[j]) >= lease_capacity:
+                if first_leased[j] < 0:
+                    first_leased[j] = t
+                area_j = portfolio_options[j, 1]
+                occupied_area += area_j
+                rate_weighted += portfolio_options[j, 0] * area_j
         if total_area > np.float32(0.0):
             portfolio_share_history[t] = occupied_area / total_area
         if occupied_area > np.float32(0.0):
@@ -227,7 +232,7 @@ def _simulate_core(
             else:
                 stable_count = 0
 
-    return portfolio_share_history, mean_rate_history, t_used, first_leased
+    return portfolio_share_history, mean_rate_history, t_used, first_leased, nest_count_history
 
 
 _rng = np.random.default_rng()
@@ -256,6 +261,7 @@ class RealEstateSimulator:
             competitor_log_sizes: np.ndarray = None,
             competitor_sizes: np.ndarray = None,
             outside_size: float = 100.0,
+            utility_scale: float = 1.0,       # temperature β: scales prospect utilities
     ):
         self.T = T
         self.K = K
@@ -264,6 +270,7 @@ class RealEstateSimulator:
         self.outside_utility = outside_utility
         self.lambda_portfolio = float(lambda_portfolio)
         self.lambda_comp = float(lambda_comp)
+        self.utility_scale = float(utility_scale)
 
         if outside_log_size is not None:
             self.outside_log_size = float(outside_log_size)
@@ -278,8 +285,6 @@ class RealEstateSimulator:
             from abi.inverse.builders import DEFAULT_COMPETITOR_SIZES
             self.competitor_log_sizes = np.log(DEFAULT_COMPETITOR_SIZES).astype(np.float32)
 
-        self._comp_supply = float(np.sum(np.exp(self.competitor_log_sizes)))
-        self._out_supply = float(np.exp(self.outside_log_size))
 
     def sample_gumbel(self, M: int):
         T, K = self.T, self.K
@@ -315,9 +320,6 @@ class RealEstateSimulator:
         N_PROPS = portfolio_options.shape[0]
         M = agents_ref.shape[0]
 
-        total_supply = N_PROPS + self._comp_supply + self._out_supply
-        demand_per_unit = np.float32(M / total_supply)
-
         if gumbel is None:
             gumbel = self.sample_gumbel(M)
         gumbel_top, gumbel_inner_p, gumbel_inner_c = gumbel
@@ -330,7 +332,7 @@ class RealEstateSimulator:
         switching_costs = agents_switching_cost.astype(np.float32)
         agent_to_properties = np.asarray(agents_to_properties, dtype=np.int32)
 
-        portfolio_share_history, mean_rate_history, t_used, first_leased = _simulate_core(
+        portfolio_share_history, mean_rate_history, t_used, first_leased, nest_count_history = _simulate_core(
             self.T,
             portfolio_options,
             competitor_options,
@@ -338,9 +340,9 @@ class RealEstateSimulator:
             np.float32(self.outside_log_size),
             np.float32(self.lambda_portfolio),
             np.float32(self.lambda_comp),
-            demand_per_unit,
             directions,
             w,
+            np.float32(self.utility_scale),
             market_mean,
             refs,
             current_nest,
@@ -361,6 +363,11 @@ class RealEstateSimulator:
         eq_occupancy = float(portfolio_share_history[t_used - window:t_used].mean())
         eq_mean_rate = float(mean_rate_history[t_used - window:t_used].mean())
 
+        # Diagnostic: average nest shares over equilibrium window (portfolio, competitor, outside)
+        eq_nest_counts = nest_count_history[t_used - window:t_used].mean(axis=0)  # shape (3,)
+        M_f = float(agents_ref.shape[0])
+        nest_shares = (eq_nest_counts / M_f).tolist()  # [portfolio, competitor, outside]
+
         return {
             "eq_step": t_used,
             "occupancy": eq_occupancy,
@@ -368,4 +375,7 @@ class RealEstateSimulator:
             "portfolio_share_history": portfolio_share_history[:t_used],
             "mean_rate_history": mean_rate_history[:t_used],
             "first_leased_step": first_leased,
+            # Diagnostics
+            "nest_shares": nest_shares,   # [portfolio_share, competitor_share, outside_share]
+            "frac_vacant": float(1.0 - eq_occupancy),
         }

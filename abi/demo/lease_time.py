@@ -79,7 +79,7 @@ from abi.inverse.sampler import MarketScenario
 
 # ── Constants (mirror abi/demo/estate.py) ────────────────────────────────────
 N_PROPS = 150
-N_AGENTS = 100
+N_AGENTS = 300
 T = 52
 N_FEATURES = 3
 K_VISIBLE = 20
@@ -87,8 +87,10 @@ K_VISIBLE = 20
 FEATURE_DIRECTIONS = np.array([-1.0, 1.0, 1.0], dtype=np.float32)
 WEIGHTS = np.array([0.4, 0.3, 0.3], dtype=np.float32)
 
-COMPETITOR_SIZES = DEFAULT_COMPETITOR_SIZES
-OUTSIDE_SIZE = DEFAULT_OUTSIDE_SIZE
+COMPETITOR_SIZES = DEFAULT_COMPETITOR_SIZES * 5   # [15, 10, 5] — mirrors estate.py
+OUTSIDE_SIZE = DEFAULT_OUTSIDE_SIZE                 # 1.0
+OUTSIDE_UTILITY = 1.0                            # mirrors estate.py
+UTILITY_SCALE = 3.0                                # temperature β — mirrors estate.py
 LAMBDA_PORTFOLIO = 0.6
 LAMBDA_COMP = 0.6
 
@@ -101,8 +103,8 @@ RESOURCES_DIR = os.path.join(_PROJECT_ROOT, "resources")
 os.makedirs(RESOURCES_DIR, exist_ok=True)
 
 # ── Generate fixed features (same seed as estate.py) ─────────────────────────
-rng_fixed = np.random.default_rng(42)
-fixed_features = rng_fixed.uniform(0.2, 0.8, size=(N_PROPS, 2)).astype(np.float32)
+rng_fixed = np.random.default_rng(52)
+fixed_features = rng_fixed.uniform(0.3, 0.8, size=(N_PROPS, 2)).astype(np.float32)
 # columns: [area, location_score]
 
 competitor_features = build_competitors()
@@ -125,11 +127,12 @@ sim = RealEstateSimulator(
     K=K_VISIBLE,
     lr_ref=0.05,
     ref_market_weight=0.3,
-    outside_utility=0.0,
+    outside_utility=OUTSIDE_UTILITY,
     outside_size=OUTSIDE_SIZE,
     lambda_portfolio=LAMBDA_PORTFOLIO,
     lambda_comp=LAMBDA_COMP,
     competitor_sizes=COMPETITOR_SIZES,
+    utility_scale=UTILITY_SCALE,
 )
 
 base_phi = MarketScenario(
