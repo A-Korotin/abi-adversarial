@@ -75,7 +75,7 @@ from abi.inverse.builders import (
     DEFAULT_COMPETITOR_SIZES,
     DEFAULT_OUTSIDE_SIZE,
 )
-from abi.inverse.sampler import MarketScenario
+from abi.inverse.scenario import MarketScenario
 
 # ── Constants (mirror abi/demo/estate.py) ────────────────────────────────────
 N_PROPS = 150
@@ -91,8 +91,6 @@ COMPETITOR_SIZES = DEFAULT_COMPETITOR_SIZES * 5   # [15, 10, 5] — mirrors esta
 OUTSIDE_SIZE = DEFAULT_OUTSIDE_SIZE                 # 1.0
 OUTSIDE_UTILITY = 1.0                            # mirrors estate.py
 UTILITY_SCALE = 3.0                                # temperature β — mirrors estate.py
-LAMBDA_PORTFOLIO = 0.6
-LAMBDA_COMP = 0.6
 
 N_RUNS = 300       # baseline Monte-Carlo runs
 N_SWEEP = 200      # runs per rate level in the sweep
@@ -126,29 +124,26 @@ sim = RealEstateSimulator(
     T=T,
     K=K_VISIBLE,
     lr_ref=0.05,
-    ref_market_weight=0.3,
     outside_utility=OUTSIDE_UTILITY,
     outside_size=OUTSIDE_SIZE,
-    lambda_portfolio=LAMBDA_PORTFOLIO,
-    lambda_comp=LAMBDA_COMP,
     competitor_sizes=COMPETITOR_SIZES,
     utility_scale=UTILITY_SCALE,
 )
 
-base_phi = MarketScenario(
+scenario = MarketScenario(
     n_agents=N_AGENTS,
-    ref_shift=np.zeros(N_FEATURES, dtype=np.float32),
+    ref_center=0.5,
     ref_std=0.1,
     switching_cost_scale=0.3,
 )
 
 # Fix agents across all runs (only Gumbel noise varies)
-agents = build_agents(base_phi, WEIGHTS, FEATURE_DIRECTIONS, n_props=N_PROPS, K=K_VISIBLE)
+agents = build_agents(scenario, WEIGHTS, FEATURE_DIRECTIONS, n_props=N_PROPS, K=K_VISIBLE)
 
 # ── Helper: run simulator and collect first_leased_step ──────────────────────
 LEASE_CAPACITY = 1  # property leased when ≥1 tenant chooses it; M-independent
 
-def _run_once(rates, disable_early_exit=True):
+def _run_once(rates):
     gumbel = sim.sample_gumbel(N_AGENTS)
     result = sim.run(
         rates=rates,
@@ -158,11 +153,9 @@ def _run_once(rates, disable_early_exit=True):
         agents_w=agents["w"],
         agents_directions=agents["directions"],
         agents_switching_cost=agents["switching_costs"],
-        agents_current_nest=agents["current_nest"].copy(),
-        agents_current_inner=agents["current_inner"].copy(),
+        agents_current_choice=agents["current_choice"].copy(),
         agents_to_properties=agents["agent_to_properties"],
         gumbel=gumbel,
-        disable_early_exit=disable_early_exit,
         lease_capacity=LEASE_CAPACITY,
     )
     return result["first_leased_step"]
