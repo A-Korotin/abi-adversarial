@@ -74,6 +74,8 @@ def _simulate_core(
         lr_ref,                   # float32: EMA learning rate for references
         gumbel,                   # (T, M, K+N_COMP+1) float32: iid Gumbel noise
         lease_capacity,           # float32: binary occupancy threshold
+        churn_u,  # (T, M) float32: uniform noise for churn events
+        churn_prob,  # float32: per-step probability an agent re-searches
 ):
     """Flat MNL choice simulation with prospect-theory utility.
 
@@ -120,6 +122,11 @@ def _simulate_core(
 
         for i in range(M):
             sc = switching_costs[i]
+
+            # --- Churn: lease ends / new need arises → free re-search this step ---
+            if current_choice[i] >= np.int32(0) and churn_u[t, i] < churn_prob:
+                current_choice[i] = np.int32(-1)
+
             cc = current_choice[i]   # current flat option index (-1 = none)
 
             # --- Compute deterministic utilities for all options ---
@@ -252,12 +259,14 @@ class RealEstateSimulator:
             competitor_sizes: np.ndarray = None,
             outside_size: float = 100.0,
             utility_scale: float = 1.0,
+            churn_prob: float = 0.0,
     ):
         self.T = T
         self.K = K
         self.lr_ref = lr_ref
         self.outside_utility = outside_utility
         self.utility_scale = float(utility_scale)
+        self.churn_prob = float(churn_prob)
 
         if outside_log_size is not None:
             self.outside_log_size = float(outside_log_size)
@@ -287,6 +296,14 @@ class RealEstateSimulator:
         np.negative(E, out=E)
         return E
 
+    def sample_churn(self, M: int, seed: int = None):
+        """Sample uniform noise for churn events, shape (T, M).
+
+        Uses an independent stream from sample_gumbel even with the same seed.
+        """
+        rng = np.random.default_rng([seed, 1]) if seed is not None else _rng
+        return rng.random((self.T, M), dtype=np.float32)
+
     def run(
             self,
             rates: np.ndarray,
@@ -299,6 +316,7 @@ class RealEstateSimulator:
             agents_current_choice: np.ndarray,
             agents_to_properties: np.ndarray,
             gumbel=None,
+            churn_u=None,
             lease_capacity: float = 1.0,
     ):
         """Run the simulation and return equilibrium metrics.
@@ -331,6 +349,8 @@ class RealEstateSimulator:
 
         if gumbel is None:
             gumbel = self.sample_gumbel(M)
+        if churn_u is None:
+            churn_u = self.sample_churn(M)
 
         refs = agents_ref.copy().astype(np.float32)
         current_choice = agents_current_choice.copy().astype(np.int32)
@@ -356,6 +376,8 @@ class RealEstateSimulator:
             self.lr_ref,
             gumbel.astype(np.float32),
             np.float32(lease_capacity),
+            churn_u.astype(np.float32),
+            np.float32(self.churn_prob),
         )
 
         # Equilibrium metrics: average over last min(20, T) steps
