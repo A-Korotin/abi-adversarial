@@ -101,6 +101,7 @@ def _simulate_core(
     portfolio_share_history = np.zeros(T, dtype=np.float32)
     mean_rate_history = np.zeros(T, dtype=np.float32)
     first_leased = np.full(N_PROPS, -1, dtype=np.int32)
+    occupied_history = np.zeros((T, N_PROPS), dtype=np.bool_)
 
     # Total portfolio area (for area-weighted metrics)
     total_area = np.float32(0.0)
@@ -185,6 +186,7 @@ def _simulate_core(
         rate_weighted = np.float32(0.0)
         for j in range(N_PROPS):
             if np.float32(chose_count[j]) >= lease_capacity:
+                occupied_history[t, j] = True
                 if first_leased[j] < 0:
                     first_leased[j] = t
                 area_j = portfolio_options[j, 1]
@@ -195,7 +197,7 @@ def _simulate_core(
         if occupied_area > np.float32(0.0):
             mean_rate_history[t] = rate_weighted / occupied_area
 
-    return portfolio_share_history, mean_rate_history, first_leased
+    return portfolio_share_history, mean_rate_history, first_leased, occupied_history
 
 
 # ── Gumbel noise generator ──────────────────────────────────────────────────
@@ -270,14 +272,20 @@ class RealEstateSimulator:
             from abi.inverse.builders import DEFAULT_COMPETITOR_SIZES
             self.competitor_log_sizes = np.log(DEFAULT_COMPETITOR_SIZES).astype(np.float32)
 
-    def sample_gumbel(self, M: int):
+    def sample_gumbel(self, M: int, seed: int = None):
         """Sample iid Gumbel(0,1) noise for one simulation run.
 
         Returns array of shape (T, M, K + N_COMP + 1).
+        If seed is given, noise is reproducible (for common random numbers).
         """
         N_COMP = len(self.competitor_log_sizes)
         N_OPTIONS = self.K + N_COMP + 1
-        return _gumbel_noise((self.T, M, N_OPTIONS))
+        rng = np.random.default_rng(seed) if seed is not None else _rng
+        E = rng.standard_exponential(size=(self.T, M, N_OPTIONS), dtype=np.float32)
+        np.clip(E, 1e-30, None, out=E)
+        np.log(E, out=E)
+        np.negative(E, out=E)
+        return E
 
     def run(
             self,
@@ -331,7 +339,7 @@ class RealEstateSimulator:
         switching_costs = agents_switching_cost.astype(np.float32)
         agent_to_properties = np.asarray(agents_to_properties, dtype=np.int32)
 
-        portfolio_share_history, mean_rate_history, first_leased = _simulate_core(
+        portfolio_share_history, mean_rate_history, first_leased, occupied_history = _simulate_core(
             self.T,
             portfolio_options,
             competitor_options,
@@ -362,5 +370,6 @@ class RealEstateSimulator:
             "portfolio_share_history": portfolio_share_history,
             "mean_rate_history": mean_rate_history,
             "first_leased_step": first_leased,
+            "occupied_history": occupied_history,
             "frac_vacant": float(1.0 - eq_occupancy),
         }

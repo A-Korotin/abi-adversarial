@@ -48,6 +48,7 @@ def build_agents(
     feature_directions: np.ndarray,
     n_props: int = 1,
     K: int = 8,
+    seed: int = None,
 ) -> dict:
     """Generate a population of heterogeneous tenant agents.
 
@@ -77,7 +78,7 @@ def build_agents(
     M = scenario.n_agents
     N_FEATURES = len(weights)
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
     refs = rng.normal(
         loc=scenario.ref_center,
         scale=scenario.ref_std,
@@ -88,7 +89,12 @@ def build_agents(
     switching_costs = rng.normal(0.2, 0.05, size=M) * scenario.switching_cost_scale
     switching_costs = np.clip(switching_costs, 1e-6, None).astype(np.float32)
 
-    agent_to_properties = rng.integers(0, n_props, size=(M, K)).astype(np.int32)
+    if K > n_props:
+        raise ValueError(f"K={K} больше числа объектов n_props={n_props}")
+    # K разных объектов на агента (выборка без возвращения)
+    agent_to_properties = (
+        rng.random((M, n_props)).argsort(axis=1)[:, :K].astype(np.int32)
+    )
 
     return {
         "refs": refs,
