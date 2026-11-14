@@ -23,7 +23,17 @@ Dynamics:
     Only updated when the agent chooses a portfolio property or competitor
     (not outside).
 
-    Binary occupancy: property j is occupied if chose_count[j] >= lease_capacity.
+    Leases and exclusive occupancy:
+        A portfolio property hosts at most one tenant at a time.  An agent who
+        leases a portfolio property or a competitor unit is locked in; each
+        step the lease expires with probability churn_prob (geometric lease
+        term with mean 1 / churn_prob steps).  On expiry the agent re-decides:
+        renew (stay, no switching cost) or move (pay switching cost).  Agents
+        on the outside option search every step and pay no switching cost to
+        enter the market.  Searchers act in a random order each step; a
+        property taken earlier in the step is unavailable to later searchers.
+        Competitor clusters aggregate many units and are not capacity-limited.
+
     Occupancy and mean_rate are area-weighted over the portfolio.
 """
 
@@ -68,18 +78,19 @@ def _simulate_core(
         w,                        # (N_F,) float32: feature weights
         utility_scale,            # float32: temperature beta
         refs,                     # (M, N_F) float32, modified in-place
-        current_choice,           # (M,) int32: flat index into options (-1 = none)
+        current_choice,           # (M,) int32: flat index into options (-1 = none), modified in-place
         switching_costs,          # (M,) float32
         agent_to_properties,      # (M, K) int32: visible property indices
         lr_ref,                   # float32: EMA learning rate for references
         gumbel,                   # (T, M, K+N_COMP+1) float32: iid Gumbel noise
-        lease_capacity,           # float32: binary occupancy threshold
-        churn_u,  # (T, M) float32: uniform noise for churn events
-        churn_prob,  # float32: per-step probability an agent re-searches
+        lease_capacity,           # float32: kept for API compatibility; only 1 is supported
+        churn_u,                  # (T, M) float32: uniform noise for lease-expiry events
+        churn_prob,               # float32: per-step lease-expiry probability
+        order,                    # (T, M) int32: per-step random permutation of agents
 ):
-    """Flat MNL choice simulation with prospect-theory utility.
+    """MNL choice with exclusive occupancy and leases.
 
-    Option indexing (flat):
+    Option indexing (flat, per agent):
         [0 .. K-1]              — K visible portfolio properties
         [K .. K+N_COMP-1]       — N_COMP competitor clusters
         [K+N_COMP]              — outside option
@@ -87,14 +98,17 @@ def _simulate_core(
     Returns
     -------
     portfolio_share_history : (T,) float32  — area-weighted occupancy per step
-    mean_rate_history       : (T,) float32  — area-weighted mean rate per step
+    mean_rate_history       : (T,) float32  — area-weighted mean rate of let units
     first_leased            : (N_PROPS,) int32 — first step each prop is leased (-1 = never)
+    occupied_history        : (T, N_PROPS) bool
     """
     M = refs.shape[0]
     N_PROPS = portfolio_options.shape[0]
     N_COMP = competitor_options.shape[0]
     K = agent_to_properties.shape[1]
     N_OPTIONS = K + N_COMP + 1
+    OUTSIDE = K + N_COMP
+    N_F = portfolio_options.shape[1]
 
     beta = np.float32(utility_scale)
     lr = np.float32(lr_ref)
@@ -105,94 +119,105 @@ def _simulate_core(
     first_leased = np.full(N_PROPS, -1, dtype=np.int32)
     occupied_history = np.zeros((T, N_PROPS), dtype=np.bool_)
 
-    # Total portfolio area (for area-weighted metrics)
     total_area = np.float32(0.0)
     for j in range(N_PROPS):
         total_area += portfolio_options[j, 1]  # feature index 1 = area
 
-    # Reusable per-agent buffer
+    # occupant[j] = agent holding property j (-1 = vacant)
+    occupant = np.full(N_PROPS, -1, dtype=np.int32)
+    # in_lease[i] = agent i holds a portfolio or competitor lease
+    in_lease = np.zeros(M, dtype=np.bool_)
+    for i in range(M):
+        cc = current_choice[i]
+        if cc >= 0 and cc < K:
+            j = agent_to_properties[i, cc]
+            if occupant[j] < 0:
+                occupant[j] = i
+                in_lease[i] = True
+            else:
+                current_choice[i] = np.int32(-1)
+        elif cc >= K and cc < OUTSIDE:
+            in_lease[i] = True
+
     v_buf = np.empty(N_OPTIONS, dtype=np.float32)
-    chose_count = np.zeros(N_PROPS, dtype=np.int32)
-    N_F = portfolio_options.shape[1]
+    avail = np.empty(N_OPTIONS, dtype=np.bool_)
 
     for t in range(T):
-        # Reset per-step property demand counts
-        for j in range(N_PROPS):
-            chose_count[j] = np.int32(0)
+        for r in range(M):
+            i = order[t, r]
 
-        for i in range(M):
+            # Locked-in tenants skip the market unless the lease expires now
+            if in_lease[i] and churn_u[t, i] >= churn_prob:
+                continue
+
+            cc = current_choice[i]
+            holds_lease = in_lease[i]
             sc = switching_costs[i]
 
-            # --- Churn: lease ends / new need arises → free re-search this step ---
-            if current_choice[i] >= np.int32(0) and churn_u[t, i] < churn_prob:
-                current_choice[i] = np.int32(-1)
-
-            cc = current_choice[i]   # current flat option index (-1 = none)
-
-            # --- Compute deterministic utilities for all options ---
-
-            # Portfolio properties (indices 0..K-1)
+            # Portfolio properties: available if vacant or held by this agent
             for k in range(K):
+                j = agent_to_properties[i, k]
+                if occupant[j] >= 0 and occupant[j] != i:
+                    avail[k] = False
+                    continue
+                avail[k] = True
                 v_buf[k] = beta * _prospect_utility(
-                    portfolio_options, agent_to_properties[i, k],
-                    refs, i, directions, w
+                    portfolio_options, j, refs, i, directions, w
                 )
 
-            # Competitor clusters (indices K..K+N_COMP-1)
             for k in range(N_COMP):
+                avail[K + k] = True
                 v_buf[K + k] = beta * _prospect_utility(
                     competitor_options, k, refs, i, directions, w
                 ) + competitor_log_sizes[k]
 
-            # Outside option (index K+N_COMP)
-            v_buf[K + N_COMP] = v_out
+            avail[OUTSIDE] = True
+            v_buf[OUTSIDE] = v_out
 
-            # --- Apply switching cost ---
-            # Subtract sc from every option except current choice
-            if cc >= np.int32(0):
+            # Switching cost: only a tenant whose lease expires pays to move
+            if holds_lease:
                 for o in range(N_OPTIONS):
                     if o != cc:
                         v_buf[o] -= sc
 
-            # --- Gumbel-max: add noise and pick argmax ---
-            best_o = np.int32(0)
-            best_v = v_buf[0] + gumbel[t, i, 0]
-            for o in range(1, N_OPTIONS):
+            # Gumbel-max over available options (outside is always available)
+            best_o = np.int32(OUTSIDE)
+            best_v = v_buf[OUTSIDE] + gumbel[t, i, OUTSIDE]
+            for o in range(OUTSIDE):
+                if not avail[o]:
+                    continue
                 v = v_buf[o] + gumbel[t, i, o]
                 if v > best_v:
                     best_v = v
                     best_o = np.int32(o)
 
-            # --- Record choice ---
+            # Release the old portfolio unit if the agent leaves it
+            if cc >= 0 and cc < K and best_o != cc:
+                j_old = agent_to_properties[i, cc]
+                if occupant[j_old] == i:
+                    occupant[j_old] = np.int32(-1)
+
             current_choice[i] = best_o
 
             if best_o < K:
-                # Chose a portfolio property
-                prop_idx = agent_to_properties[i, best_o]
-                chose_count[prop_idx] += np.int32(1)
-
-                # Update reference (EMA toward chosen property features)
+                j = agent_to_properties[i, best_o]
+                occupant[j] = np.int32(i)
+                in_lease[i] = True
                 for f in range(N_F):
-                    refs[i, f] = (
-                        (np.float32(1.0) - lr) * refs[i, f]
-                        + lr * portfolio_options[prop_idx, f]
-                    )
-
-            elif best_o < K + N_COMP:
-                # Chose a competitor cluster
+                    refs[i, f] = (np.float32(1.0) - lr) * refs[i, f] + lr * portfolio_options[j, f]
+            elif best_o < OUTSIDE:
+                in_lease[i] = True
                 comp_idx = best_o - K
                 for f in range(N_F):
-                    refs[i, f] = (
-                        (np.float32(1.0) - lr) * refs[i, f]
-                        + lr * competitor_options[comp_idx, f]
-                    )
-            # Outside option: no reference update
+                    refs[i, f] = (np.float32(1.0) - lr) * refs[i, f] + lr * competitor_options[comp_idx, f]
+            else:
+                in_lease[i] = False
 
-        # --- Binary occupancy and area-weighted metrics ---
+        # --- Area-weighted metrics ---
         occupied_area = np.float32(0.0)
         rate_weighted = np.float32(0.0)
         for j in range(N_PROPS):
-            if np.float32(chose_count[j]) >= lease_capacity:
+            if occupant[j] >= 0:
                 occupied_history[t, j] = True
                 if first_leased[j] < 0:
                     first_leased[j] = t
@@ -259,7 +284,7 @@ class RealEstateSimulator:
             competitor_sizes: np.ndarray = None,
             outside_size: float = 100.0,
             utility_scale: float = 1.0,
-            churn_prob: float = 0.0,
+            churn_prob: float = 1.0 / 104.0,
     ):
         self.T = T
         self.K = K
@@ -289,7 +314,7 @@ class RealEstateSimulator:
         """
         N_COMP = len(self.competitor_log_sizes)
         N_OPTIONS = self.K + N_COMP + 1
-        rng = np.random.default_rng(seed) if seed is not None else _rng
+        rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
         E = rng.standard_exponential(size=(self.T, M, N_OPTIONS), dtype=np.float32)
         np.clip(E, 1e-30, None, out=E)
         np.log(E, out=E)
@@ -301,8 +326,17 @@ class RealEstateSimulator:
 
         Uses an independent stream from sample_gumbel even with the same seed.
         """
-        rng = np.random.default_rng([seed, 1]) if seed is not None else _rng
+        rng = np.random.default_rng([seed, 1]) if seed is not None else np.random.default_rng()
         return rng.random((self.T, M), dtype=np.float32)
+
+    def sample_order(self, M: int, seed: int = None):
+        """Per-step random permutation of agents, shape (T, M).
+
+        Independent stream from sample_gumbel / sample_churn even with the same seed.
+        """
+        rng = np.random.default_rng([seed, 2]) if seed is not None else np.random.default_rng()
+        base = np.broadcast_to(np.arange(M, dtype=np.int32), (self.T, M))
+        return rng.permuted(base, axis=1).astype(np.int32)
 
     def run(
             self,
@@ -318,6 +352,7 @@ class RealEstateSimulator:
             gumbel=None,
             churn_u=None,
             lease_capacity: float = 1.0,
+            order=None,
     ):
         """Run the simulation and return equilibrium metrics.
 
@@ -333,7 +368,8 @@ class RealEstateSimulator:
         agents_current_choice : (M,) int32 — current flat option index (-1 = none)
         agents_to_properties : (M, K) int32 — visible property indices
         gumbel : (T, M, N_OPTIONS) float32 or None — pre-sampled noise (CRN)
-        lease_capacity : float — binary occupancy threshold
+        lease_capacity : float — must be 1 (one tenant per unit); kept for API compatibility
+        order : (T, M) int32 or None — per-step agent order (CRN); sampled if None
 
         Returns
         -------
@@ -349,8 +385,12 @@ class RealEstateSimulator:
 
         if gumbel is None:
             gumbel = self.sample_gumbel(M)
+        if lease_capacity != 1.0:
+            raise ValueError("only lease_capacity=1 (one tenant per unit) is supported")
         if churn_u is None:
-            churn_u = self.sample_churn(M)
+            churn_u = np.random.default_rng().random((self.T, M), dtype=np.float32)
+        if order is None:
+            order = self.sample_order(M)
 
         refs = agents_ref.copy().astype(np.float32)
         current_choice = agents_current_choice.copy().astype(np.int32)
@@ -378,6 +418,7 @@ class RealEstateSimulator:
             np.float32(lease_capacity),
             churn_u.astype(np.float32),
             np.float32(self.churn_prob),
+            np.asarray(order, dtype=np.int32),
         )
 
         # Equilibrium metrics: average over last min(20, T) steps

@@ -21,6 +21,8 @@ def evaluate_candidate(
         competitor_features: np.ndarray,
         agents: dict,
         gumbel=None,
+        churn_u=None,
+        order=None,
 ) -> dict:
     """Run one simulation and compute loss."""
     result = simulator.run(
@@ -34,6 +36,8 @@ def evaluate_candidate(
         agents_current_choice=agents["current_choice"],
         agents_to_properties=agents["agent_to_properties"],
         gumbel=gumbel,
+        churn_u=churn_u,
+        order=order,
     )
 
     loss = loss_fn(occupancy=result["occupancy"], mean_rate=result["mean_rate"])
@@ -90,14 +94,17 @@ def optimize_rates(
             # Sample rate population (mirrored for variance reduction)
             xi_pop = generator.sample_population(pop_size, mirrored=True)
 
-            # CRN: shared Gumbel noise across all candidates
-            g = simulator.sample_gumbel(M)
+            # CRN: shared Gumbel noise, lease expires and agent order across all candidates
+            seed = int(np.random.randint(0, 2**31 - 1))
+            g = simulator.sample_gumbel(M, seed=seed)
+            cu = simulator.sample_churn(M, seed=seed)
+            order = simulator.sample_order(M, seed=seed)
 
             results = list(pool.map(
                 lambda xi: evaluate_candidate(
                     simulator, loss_fn, xi,
                     fixed_features, competitor_features,
-                    agents, g,
+                    agents, g, cu, order,
                 ),
                 xi_pop,
             ))
