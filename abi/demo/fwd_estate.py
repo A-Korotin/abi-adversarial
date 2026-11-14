@@ -29,7 +29,7 @@ from abi.inverse.builders import (
     build_competitors, build_agents,
     DEFAULT_COMPETITOR_SIZES, DEFAULT_OUTSIDE_SIZE,
 )
-from abi.inverse.sampler import MarketScenario
+from abi.inverse.scenario import MarketScenario
 
 N_PROPS    = 150
 N_AGENTS   = 5_000
@@ -71,14 +71,14 @@ else:
     print(f"  мин={rates.min():.3f}  медиана={np.median(rates):.3f}  макс={rates.max():.3f}")
 
 
-phi = MarketScenario(
+scenario = MarketScenario(
     n_agents=N_AGENTS,
-    ref_shift=np.zeros(N_FEATURES, dtype=np.float32),
+    ref_center=0.5,
     ref_std=0.1,
     switching_cost_scale=0.3,
 )
 np.random.seed(args.seed)
-agents = build_agents(phi, WEIGHTS, FEATURE_DIRECTIONS, n_props=N_PROPS, K=K_VISIBLE)
+agents = build_agents(scenario, WEIGHTS, FEATURE_DIRECTIONS, n_props=N_PROPS, K=K_VISIBLE)
 
 competitor_features = build_competitors()
 
@@ -86,11 +86,8 @@ simulator = RealEstateSimulator(
     T=T,
     K=K_VISIBLE,
     lr_ref=0.05,
-    ref_market_weight=0.3,
     outside_utility=0.0,
     outside_size=DEFAULT_OUTSIDE_SIZE,
-    lambda_portfolio=0.6,
-    lambda_comp=0.6,
     competitor_sizes=DEFAULT_COMPETITOR_SIZES,
 )
 
@@ -102,8 +99,7 @@ result = simulator.run(
     agents_w=agents["w"],
     agents_directions=agents["directions"],
     agents_switching_cost=agents["switching_costs"],
-    agents_current_nest=agents["current_nest"],
-    agents_current_inner=agents["current_inner"],
+    agents_current_choice=agents["current_choice"],
     agents_to_properties=agents["agent_to_properties"],
 )
 
